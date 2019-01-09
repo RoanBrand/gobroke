@@ -1,4 +1,4 @@
-package go_mqtt_server
+package broker
 
 // Control Packets
 const (

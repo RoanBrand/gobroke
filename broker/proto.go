@@ -1,7 +1,4 @@
-// TODO: Websocket, Config, Qos1&2, path system, wildcards, $SYS topic, persistence
-// TODO: rate limiting, TLS, user system with subscribe white- & blacklist
-
-package go_mqtt_server
+package broker
 
 import (
 	"encoding/binary"
@@ -10,100 +7,8 @@ import (
 	"log"
 	"net"
 	"strings"
-	"sync"
 	"time"
 )
-
-type server struct {
-	clients map[string]*session
-	cLock   sync.RWMutex
-
-	subscriptions map[string]map[string]uint8 // channel -> subscribed client id -> QoS
-	sLock         sync.RWMutex
-}
-
-func NewServer() *server {
-	return &server{
-		clients:       make(map[string]*session, 16),
-		subscriptions: make(map[string]map[string]uint8, 4),
-	}
-}
-
-type session struct {
-	conn             net.Conn
-	serverClosedConn bool
-
-	packet  packet
-	rxState uint8
-	tx      chan []byte
-	rx      chan struct{}
-
-	sentConnectPacket bool
-	notFirstSession   bool
-	connectFlags      byte
-	keepAlive         uint16
-
-	clientId      string
-	subscriptions map[string]struct{} // unused. list of channels
-	// QoS 1 & 2 unacknowledged and pending
-
-}
-
-func (s *session) close() {
-	if !s.serverClosedConn {
-		close(s.tx) // dont like this
-	}
-	s.serverClosedConn = true
-	s.conn.Close()
-
-}
-
-func (s *session) sendConnack(errCode uint8) error {
-	// [MQTT-3.2.2-1, 2-2, 2-3]
-	var sp byte = 0
-	if errCode == 0 && s.notFirstSession {
-		sp = 1
-	}
-	p := []byte{CONNACK << 4, 2, sp, errCode}
-	_, err := s.conn.Write(p)
-	return err
-}
-
-func (s *session) sendInvalidProtocol() error {
-	s.sendConnack(1) // [MQTT-3.1.2-2]
-	s.close()
-	return errors.New("bad CONNECT: invalid protocol")
-}
-
-func (s *session) stickySession() bool {
-	return s.connectFlags&0x02 == 0
-}
-
-func (s *session) startWriter() {
-	for p := range s.tx {
-		if _, err := s.conn.Write(p); err != nil {
-			log.Println("Error tcp tx:", err)
-			return
-		}
-	}
-}
-
-func (s *session) watchDog() {
-	per := time.Second * time.Duration(s.keepAlive) * 3 / 2
-	t := time.NewTimer(per)
-	for {
-		select {
-		case <-t.C:
-			s.close() // [MQTT-3.1.2-24]
-			return
-		case <-s.rx:
-			if !t.Stop() {
-				<-t.C
-			}
-			t.Reset(per)
-		}
-	}
-}
 
 func (s *server) parseStream(session *session, rx []byte) error {
 	p := &session.packet
@@ -376,7 +281,7 @@ func (s *server) handlePublish(session *session) {
 			pubPack = append(pubPack, variableLengthEncode(int(topicLen)+len(msg)+2)...)
 			pubPack = append(pubPack, vh[:topicLen+2]...) // 2 bytes + topic
 			pubPack = append(pubPack, msg...)
-			client.tx <-pubPack
+			client.tx <- pubPack
 		}
 	}
 	s.sLock.RUnlock()
@@ -392,7 +297,7 @@ func variableLengthEncode(l int) []byte {
 			eb = eb | 128
 		}
 		res = append(res, byte(eb))
-		if l<=0 {
+		if l <= 0 {
 			break
 		}
 	}
@@ -431,50 +336,6 @@ func (s *server) handleConnect(session *session) {
 	s.addClient(session)
 	session.sendConnack(0)
 	go session.startWriter()
-}
-
-func (s *server) addClient(newClient *session) {
-	// [MQTT-3.1.2-4]
-	log.Println("adding new client:", newClient.clientId)
-	s.cLock.Lock()
-	oldSession, present := s.clients[newClient.clientId]
-	if present {
-		log.Println("old session present. closing that connection")
-		oldSession.close()
-		if newClient.stickySession() && oldSession.stickySession() {
-			newClient.notFirstSession = true
-			log.Println("new client inheriting old session state")
-			newClient.subscriptions = oldSession.subscriptions
-		}
-	}
-
-	s.clients[newClient.clientId] = newClient
-	s.cLock.Unlock()
-
-	go newClient.watchDog()
-}
-
-func (s *server) removeClient(id string) {
-	log.Println("deleting client session:", id)
-	s.cLock.Lock()
-	delete(s.clients, id)
-	s.cLock.Unlock()
-}
-
-func (s *server) Start() error {
-	l, err := net.Listen("tcp", ":1883")
-	if err != nil {
-		return err
-	}
-
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			return err
-		}
-
-		go s.handleNewConn(conn)
-	}
 }
 
 func (s *server) handleNewConn(conn net.Conn) {

@@ -1,11 +1,12 @@
 package main
 
 import (
-	"github.com/RoanBrand/gobroke/go-mqtt-server"
 	"log"
+
+	"github.com/RoanBrand/gobroke/broker"
 )
 
 func main() {
-	s := go_mqtt_server.NewServer()
+	s := broker.NewServer()
 	log.Fatal(s.Start())
 }
