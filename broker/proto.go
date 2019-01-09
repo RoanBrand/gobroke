@@ -17,7 +17,7 @@ func (s *server) parseStream(session *session, rx []byte) error {
 	for i < len(rx) {
 		switch session.rxState {
 		case controlAndFlags:
-			p.controlType = rx[i] >> 4
+			p.controlType = rx[i] & 0xF0
 			p.flags = rx[i] & 0x0F
 			if p.controlType < CONNECT || p.controlType > DISCONNECT {
 				return fmt.Errorf("invalid control packet type: %d", p.controlType)
@@ -74,7 +74,7 @@ func (s *server) parseStream(session *session, rx []byte) error {
 					}
 					p.vhLen = 2
 				case PINGREQ:
-					session.tx <- []byte{PINGRESP << 4, 0}
+					session.tx <- pingRespPacket
 				}
 
 				if p.remainingLength == 0 {
@@ -143,7 +143,7 @@ func (s *server) parseStream(session *session, rx []byte) error {
 					p.vhLen++
 					if p.vhLen == 2 {
 						// vhLen is now remaining
-						p.vhLen = uint32(p.variableHeader[0])<<8 | uint32(p.variableHeader[1])
+						p.vhLen = uint32(binary.BigEndian.Uint16(p.variableHeader))
 						if p.flags&0x06 > 0 { // Qos > 0
 							p.vhLen += 2
 						}
@@ -261,34 +261,46 @@ func (s *server) handleSubscribe(session *session) {
 	s.sLock.Unlock()
 
 	id := session.packet.identifier
-	session.tx <- []byte{SUBACK << 4, 3, uint8(id >> 8), uint8(id), 0}
+	session.tx <- []byte{SUBACK, 3, uint8(id >> 8), uint8(id), 0}
 }
 
 func (s *server) handlePublish(session *session) {
 	p := &session.packet
 	vh := p.variableHeader
 	msg := p.payload
-	topicLen := binary.BigEndian.Uint16(vh)
-	if p.flags&0x06 > 0 { // Qos > 0
-		p.identifier = uint16(vh[len(vh)-2]<<8) | uint16(vh[len(vh)-1])
-	}
+	mLen := len(msg)
+	topicLen := int(binary.BigEndian.Uint16(vh))
+	topic := string(vh[2 : topicLen+2])
 
-	fmt.Printf("Got publish from client '%s' to Topic '%s'. Msg: %s\n", session.clientId, vh[2:topicLen+2], string(msg))
+	/*if p.flags&0x06 > 0 { // Qos > 0
+		// uint16(vh[len(vh)-2]<<8) | uint16(vh[len(vh)-1])
+		p.identifier = binary.BigEndian.Uint16(vh[len(vh)-2:])
+	}*/
 
-	s.sLock.RLock() // cannot return early unless we make copy op details first
-	s.cLock.RLock()
-	for c := range s.subscriptions[string(vh[2:topicLen+2])] {
-		client, ok := s.clients[c]
-		if ok {
-			pubPack := []byte{PUBLISH << 4}
-			pubPack = append(pubPack, variableLengthEncode(int(topicLen)+len(msg)+2)...)
-			pubPack = append(pubPack, vh[:topicLen+2]...) // 2 bytes + topic
-			pubPack = append(pubPack, msg...)
-			client.tx <- pubPack
+	log.WithFields(log.Fields{
+		"id":      session.clientId,
+		"Topic":   topic,
+		"Payload": string(msg),
+	}).Debug("Got PUBLISH packet")
+
+	pubPack := make([]byte, 1, 7+topicLen+mLen) // ctrl 1 + remainLen 4max + topicLen 2 + topicLen + msgLen
+	pubPack[0] = PUBLISH
+	pubPack = append(pubPack, variableLengthEncode(topicLen+mLen+2)...)
+	pubPack = append(pubPack, vh[:topicLen+2]...) // 2 bytes + topic
+	pubPack = append(pubPack, msg...)
+
+	go func(p []byte, topic string) {
+		s.sLock.RLock()
+		s.cLock.RLock()
+		for c := range s.subscriptions[topic] {
+			client, ok := s.clients[c]
+			if ok {
+				client.tx <- p
+			}
 		}
-	}
-	s.sLock.RUnlock()
-	s.cLock.RUnlock()
+		s.sLock.RUnlock()
+		s.cLock.RUnlock()
+	}(pubPack, topic)
 }
 
 func variableLengthEncode(l int) []byte {
@@ -318,7 +330,7 @@ func (s *server) handleConnect(session *session) {
 		return
 	}
 
-	clientIdLen := p[0]<<8 | p[1]
+	clientIdLen := binary.BigEndian.Uint16(p)
 	if clientIdLen > 0 {
 		session.clientId = string(p[2 : clientIdLen+2])
 	} else {

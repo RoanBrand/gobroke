@@ -2,21 +2,23 @@ package broker
 
 // Control Packets
 const (
-	CONNECT     = 1
-	CONNACK     = 2
-	PUBLISH     = 3
-	PUBACK      = 4
-	PUBREC      = 5
-	PUBREL      = 6
-	PUBCOMP     = 7
-	SUBSCRIBE   = 8
-	SUBACK      = 9
-	UNSUBSCRIBE = 10
-	UNSUBACK    = 11
-	PINGREQ     = 12
-	PINGRESP    = 13
-	DISCONNECT  = 14
+	CONNECT     = 1 << 4
+	CONNACK     = 2 << 4
+	PUBLISH     = 3 << 4
+	PUBACK      = 4 << 4
+	PUBREC      = 5 << 4
+	PUBREL      = 6 << 4
+	PUBCOMP     = 7 << 4
+	SUBSCRIBE   = 8 << 4
+	SUBACK      = 9 << 4
+	UNSUBSCRIBE = 10 << 4
+	UNSUBACK    = 11 << 4
+	PINGREQ     = 12 << 4
+	PINGRESP    = 13 << 4
+	DISCONNECT  = 14 << 4
 )
+
+var pingRespPacket = []byte{PINGRESP, 0}
 
 const (
 	// Fixed header

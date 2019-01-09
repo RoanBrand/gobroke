@@ -42,7 +42,7 @@ func (s *session) sendConnack(errCode uint8) error {
 	if errCode == 0 && s.notFirstSession {
 		sp = 1
 	}
-	p := []byte{CONNACK << 4, 2, sp, errCode}
+	p := []byte{CONNACK, 2, sp, errCode}
 	_, err := s.conn.Write(p)
 	return err
 }
