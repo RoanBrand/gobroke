@@ -1,9 +1,10 @@
 package broker
 
 import (
-	"log"
 	"net"
 	"sync"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type server struct {
@@ -38,16 +39,24 @@ func (s *server) Start() error {
 }
 
 func (s *server) addClient(newClient *session) {
+	log.WithFields(log.Fields{
+		"id": newClient.clientId,
+	}).Info("New client")
+
 	// [MQTT-3.1.2-4]
-	log.Println("adding new client:", newClient.clientId)
 	s.cLock.Lock()
 	oldSession, present := s.clients[newClient.clientId]
 	if present {
-		log.Println("old session present. closing that connection")
+		log.WithFields(log.Fields{
+			"id": newClient.clientId,
+		}).Debug("Old session present. Closing that connection")
 		oldSession.close()
+
 		if newClient.stickySession() && oldSession.stickySession() {
 			newClient.notFirstSession = true
-			log.Println("new client inheriting old session state")
+			log.WithFields(log.Fields{
+				"id": newClient.clientId,
+			}).Debug("New client inheriting old session state")
 			newClient.subscriptions = oldSession.subscriptions
 		}
 	}
@@ -59,7 +68,9 @@ func (s *server) addClient(newClient *session) {
 }
 
 func (s *server) removeClient(id string) {
-	log.Println("deleting client session:", id)
+	log.WithFields(log.Fields{
+		"id": id,
+	}).Debug("Deleting client session (CleanSession)")
 	s.cLock.Lock()
 	delete(s.clients, id)
 	s.cLock.Unlock()

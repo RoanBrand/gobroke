@@ -2,9 +2,10 @@ package broker
 
 import (
 	"errors"
-	"log"
 	"net"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type session struct {
@@ -59,7 +60,10 @@ func (s *session) stickySession() bool {
 func (s *session) startWriter() {
 	for p := range s.tx {
 		if _, err := s.conn.Write(p); err != nil {
-			log.Println("Error tcp tx:", err)
+			log.WithFields(log.Fields{
+				"id":  s.clientId,
+				"err": err,
+			}).Error("TCP TX error")
 			return
 		}
 	}

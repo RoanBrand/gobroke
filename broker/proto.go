@@ -4,10 +4,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 func (s *server) parseStream(session *session, rx []byte) error {
@@ -23,7 +24,9 @@ func (s *server) parseStream(session *session, rx []byte) error {
 			}
 
 			if p.controlType == DISCONNECT {
-				log.Println("GOT DISCONNECT")
+				log.WithFields(log.Fields{
+					"id": session.clientId,
+				}).Debug("Got DISCONNECT packet")
 			}
 
 			if p.controlType == SUBSCRIBE && p.flags != 0x02 { // [MQTT-3.8.1-1]
