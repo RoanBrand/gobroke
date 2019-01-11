@@ -1,6 +1,7 @@
 package broker
 
 import (
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -74,7 +75,7 @@ func (s *server) parseStream(session *session, rx []byte) error {
 					}
 					p.vhLen = 2
 				case PINGREQ:
-					session.tx <- pingRespPacket
+					session.writePacket(pingRespPacket)
 				}
 
 				if p.remainingLength == 0 {
@@ -262,7 +263,7 @@ func (s *server) handleSubscribe(session *session) {
 	s.sLock.Unlock()
 
 	id := session.packet.identifier
-	session.tx <- []byte{SUBACK, 3, uint8(id >> 8), uint8(id), 0}
+	session.writePacket([]byte{SUBACK, 3, uint8(id >> 8), uint8(id), 0})
 }
 
 func (s *server) handlePublish(session *session) {
@@ -296,7 +297,7 @@ func (s *server) handlePublish(session *session) {
 		for c := range s.subscriptions[topic] {
 			client, ok := s.clients[c]
 			if ok {
-				client.tx <- p
+				client.writePacket(p)
 			}
 		}
 		s.sLock.RUnlock()
@@ -358,7 +359,8 @@ func (s *server) handleNewConn(conn net.Conn) {
 	// TODO: Do not spin up session unless CONNECT received first, and in timely fashion.
 	newSession := session{
 		conn:          conn,
-		tx:            make(chan []byte, 1),
+		tx:            bufio.NewWriter(conn),
+		txFlush:       make(chan struct{}, 1),
 		subscriptions: make(map[string]struct{}),
 		packet: packet{
 			variableHeader: make([]byte, 0, 512),
@@ -378,8 +380,7 @@ func (s *server) handleNewConn(conn net.Conn) {
 				return
 			}
 
-			if strings.Contains(err.Error(), "use of closed") && newSession.serverClosedConn {
-				log.Println(err)
+			if strings.Contains(err.Error(), "use of closed") {
 				return
 			}
 

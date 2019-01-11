@@ -1,20 +1,23 @@
 package broker
 
 import (
+	"bufio"
 	"errors"
 	"net"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 )
 
 type session struct {
-	conn             net.Conn
-	serverClosedConn bool
+	conn    net.Conn
+	tx      *bufio.Writer
+	txLock  sync.Mutex
+	txFlush chan struct{}
 
 	packet  packet
 	rxState uint8
-	tx      chan []byte
 
 	sentConnectPacket bool
 	notFirstSession   bool
@@ -27,10 +30,6 @@ type session struct {
 }
 
 func (s *session) close() {
-	if !s.serverClosedConn {
-		close(s.tx) // dont like this
-	}
-	s.serverClosedConn = true
 	s.conn.Close()
 }
 
@@ -62,13 +61,36 @@ func (s *session) stickySession() bool {
 }
 
 func (s *session) startWriter() {
-	for p := range s.tx {
-		if _, err := s.conn.Write(p); err != nil {
-			log.WithFields(log.Fields{
-				"id":  s.clientId,
-				"err": err,
-			}).Error("TCP TX error")
-			return
+	for range s.txFlush {
+		s.txLock.Lock()
+		if s.tx.Buffered() > 0 {
+			if err := s.tx.Flush(); err != nil {
+				log.WithFields(log.Fields{
+					"id":  s.clientId,
+					"err": err,
+				}).Error("TCP TX error")
+				s.txLock.Unlock()
+				return
+			}
+		}
+		s.txLock.Unlock()
+	}
+}
+
+func (s *session) writePacket(p []byte) error {
+	s.txLock.Lock()
+	if _, err := s.tx.Write(p); err != nil {
+		s.txLock.Unlock()
+		return err
+	}
+
+	if len(s.txFlush) == 0 {
+		select {
+		case s.txFlush <- struct{}{}:
+		default:
 		}
 	}
+
+	s.txLock.Unlock()
+	return nil
 }
