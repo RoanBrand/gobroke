@@ -78,7 +78,7 @@ func (s *server) parseStream(session *session, rx []byte) error {
 				}
 
 				if p.remainingLength == 0 {
-					session.rx <- struct{}{}
+					session.setDeadline()
 					session.rxState = controlAndFlags
 				} else {
 					p.variableHeader = p.variableHeader[:0]
@@ -125,9 +125,10 @@ func (s *server) parseStream(session *session, rx []byte) error {
 						return session.sendInvalidProtocol()
 					}
 				case 2:
-					session.keepAlive = uint16(rx[i]) << 8
+					break
 				case 1:
-					session.keepAlive |= uint16(rx[i])
+					// [MQTT-3.1.2-24]
+					session.keepAlive = time.Duration(binary.BigEndian.Uint16(rx[i-1:])) * time.Second * 3 / 2
 					p.payload = p.payload[:0]
 					session.rxState = payload
 				default:
@@ -195,7 +196,7 @@ func (s *server) parseStream(session *session, rx []byte) error {
 			}
 
 			if p.remainingLength == 0 {
-				session.rx <- struct{}{}
+				session.setDeadline()
 				session.rxState = controlAndFlags
 			}
 
@@ -217,7 +218,7 @@ func (s *server) parseStream(session *session, rx []byte) error {
 				case SUBSCRIBE:
 					s.handleSubscribe(session)
 				}
-				session.rx <- struct{}{}
+				session.setDeadline()
 				session.rxState = controlAndFlags
 			}
 
@@ -324,8 +325,7 @@ var unNamedClients int
 func (s *server) handleConnect(session *session) {
 	p := session.packet.payload
 	if len(p) < 2 { // [MQTT-3.1.3-3]
-		// TODO: confirm if this is correct behaviour, i.e. send anything before closing?
-		session.close()
+		session.close() // close conn. throw all away
 		log.Println("CONNECT packet payload error")
 		return
 	}
@@ -348,6 +348,7 @@ func (s *server) handleConnect(session *session) {
 	// TODO: Will Topic, Will Msg, User Name, Password
 
 	session.sentConnectPacket = true
+	session.setDeadline()
 	s.addClient(session)
 	session.sendConnack(0)
 	go session.startWriter()
@@ -358,7 +359,6 @@ func (s *server) handleNewConn(conn net.Conn) {
 	newSession := session{
 		conn:          conn,
 		tx:            make(chan []byte, 1),
-		rx:            make(chan struct{}),
 		subscriptions: make(map[string]struct{}),
 		packet: packet{
 			variableHeader: make([]byte, 0, 512),
@@ -379,6 +379,7 @@ func (s *server) handleNewConn(conn net.Conn) {
 			}
 
 			if strings.Contains(err.Error(), "use of closed") && newSession.serverClosedConn {
+				log.Println(err)
 				return
 			}
 

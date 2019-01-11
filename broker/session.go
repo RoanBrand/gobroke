@@ -15,12 +15,11 @@ type session struct {
 	packet  packet
 	rxState uint8
 	tx      chan []byte
-	rx      chan struct{}
 
 	sentConnectPacket bool
 	notFirstSession   bool
 	connectFlags      byte
-	keepAlive         uint16
+	keepAlive         time.Duration
 
 	clientId      string
 	subscriptions map[string]struct{} // unused. list of channels
@@ -33,7 +32,12 @@ func (s *session) close() {
 	}
 	s.serverClosedConn = true
 	s.conn.Close()
+}
 
+func (s *session) setDeadline() {
+	if s.keepAlive > 0 {
+		s.conn.SetReadDeadline(time.Now().Add(s.keepAlive))
+	}
 }
 
 func (s *session) sendConnack(errCode uint8) error {
@@ -65,23 +69,6 @@ func (s *session) startWriter() {
 				"err": err,
 			}).Error("TCP TX error")
 			return
-		}
-	}
-}
-
-func (s *session) watchDog() {
-	per := time.Second * time.Duration(s.keepAlive) * 3 / 2
-	t := time.NewTimer(per)
-	for {
-		select {
-		case <-t.C:
-			s.close() // [MQTT-3.1.2-24]
-			return
-		case <-s.rx:
-			if !t.Stop() {
-				<-t.C
-			}
-			t.Reset(per)
 		}
 	}
 }

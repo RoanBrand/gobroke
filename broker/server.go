@@ -63,8 +63,6 @@ func (s *server) addClient(newClient *session) {
 
 	s.clients[newClient.clientId] = newClient
 	s.cLock.Unlock()
-
-	go newClient.watchDog()
 }
 
 func (s *server) removeClient(id string) {
