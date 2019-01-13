@@ -52,7 +52,7 @@ func (s *server) addClient(newClient *session) {
 		}).Debug("Old session present. Closing that connection")
 		oldSession.close()
 
-		if newClient.stickySession() && oldSession.stickySession() {
+		if newClient.persistent() && oldSession.persistent() {
 			newClient.notFirstSession = true
 			log.WithFields(log.Fields{
 				"id": newClient.clientId,

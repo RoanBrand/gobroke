@@ -2,7 +2,6 @@ package broker
 
 import (
 	"bufio"
-	"errors"
 	"net"
 	"sync"
 	"time"
@@ -50,13 +49,7 @@ func (s *session) sendConnack(errCode uint8) error {
 	return err
 }
 
-func (s *session) sendInvalidProtocol() error {
-	s.sendConnack(1) // [MQTT-3.1.2-2]
-	s.close()
-	return errors.New("bad CONNECT: invalid protocol")
-}
-
-func (s *session) stickySession() bool {
+func (s *session) persistent() bool {
 	return s.connectFlags&0x02 == 0
 }
 

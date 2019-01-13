@@ -2,6 +2,7 @@ package broker
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -91,54 +92,36 @@ func (s *server) parseStream(session *session, rx []byte) error {
 		case variableHeader:
 			switch p.controlType {
 			case CONNECT:
-				switch p.vhLen {
-				case 10:
-					if rx[i] != 0 {
-						return session.sendInvalidProtocol()
-					}
-				case 9:
-					if rx[i] != 4 {
-						return session.sendInvalidProtocol()
-					}
-				case 8:
-					if rx[i] != 'M' {
-						return session.sendInvalidProtocol()
-					}
-				case 7:
-					if rx[i] != 'Q' {
-						return session.sendInvalidProtocol()
-					}
-				case 6:
-					if rx[i] != 'T' {
-						return session.sendInvalidProtocol()
-					}
-				case 5:
-					if rx[i] != 'T' {
-						return session.sendInvalidProtocol()
-					}
-				case 4:
-					if rx[i] != 4 {
-						return session.sendInvalidProtocol()
-					}
-				case 3:
-					session.connectFlags = rx[i]
-					if session.connectFlags&0x01 > 0 { // [MQTT-3.1.2-3]
-						return session.sendInvalidProtocol()
-					}
-				case 2:
-					break
-				case 1:
-					// [MQTT-3.1.2-24]
-					session.keepAlive = time.Duration(binary.BigEndian.Uint16(rx[i-1:])) * time.Second * 3 / 2
-					p.payload = p.payload[:0]
-					session.rxState = payload
-				default:
-					return session.sendInvalidProtocol()
+				avail := uint32(len(rx) - i)
+				toRead := p.vhLen
+				if avail < toRead {
+					toRead = avail
 				}
 
-				p.vhLen--
-				p.remainingLength--
-				i++
+				p.variableHeader = append(p.variableHeader, rx[i:i+int(toRead)]...)
+				p.vhLen -= toRead
+
+				if p.vhLen == 0 {
+					if !bytes.Equal(connectPacket, p.variableHeader[:7]) { // [MQTT-3.1.2-1]
+						session.sendConnack(1) // [MQTT-3.1.2-2]
+						session.close()
+						return errors.New("bad CONNECT: invalid protocol")
+					}
+
+					session.connectFlags = p.variableHeader[7]
+					if session.connectFlags&0x01 > 0 { // [MQTT-3.1.2-3]
+						session.close()
+						return errors.New("bad CONNECT")
+					}
+
+					// [MQTT-3.1.2-24]
+					session.keepAlive = time.Duration(binary.BigEndian.Uint16(p.variableHeader[8:])) * time.Second * 3 / 2
+					p.payload = p.payload[:0]
+					session.rxState = payload
+				}
+
+				p.remainingLength -= toRead
+				i += int(toRead)
 			case PUBLISH:
 				if !p.gotVhLen {
 					p.variableHeader = append(p.variableHeader, rx[i])
@@ -335,7 +318,7 @@ func (s *server) handleConnect(session *session) {
 	if clientIdLen > 0 {
 		session.clientId = string(p[2 : clientIdLen+2])
 	} else {
-		if session.stickySession() { // [MQTT-3.1.3-7]
+		if session.persistent() { // [MQTT-3.1.3-7]
 			session.sendConnack(2) // [MQTT-3.1.3-8]
 			session.close()
 			log.Println("CONNECT packet wrong")
@@ -374,7 +357,7 @@ func (s *server) handleNewConn(conn net.Conn) {
 		if err != nil {
 			if err.Error() == "EOF" {
 				log.Println("client closed connection gracefully")
-				if !newSession.stickySession() { // [MQTT-3.1.2-6]
+				if !newSession.persistent() { // [MQTT-3.1.2-6]
 					s.removeClient(newSession.clientId)
 				}
 				return

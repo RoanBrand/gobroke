@@ -18,6 +18,7 @@ const (
 	DISCONNECT  = 14 << 4
 )
 
+var connectPacket = []byte{0, 4, 'M', 'Q', 'T', 'T', 4}
 var pingRespPacket = []byte{PINGRESP, 0}
 
 const (
