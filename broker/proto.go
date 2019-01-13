@@ -15,8 +15,10 @@ import (
 
 func (s *server) parseStream(session *session, rx []byte) error {
 	p := &session.packet
-	i := 0
-	for i < len(rx) {
+	l := uint32(len(rx))
+	var i uint32
+
+	for i < l {
 		switch session.rxState {
 		case controlAndFlags:
 			p.controlType = rx[i] & 0xF0
@@ -54,7 +56,6 @@ func (s *server) parseStream(session *session, rx []byte) error {
 			p.remainingLength = 0
 			session.rxState = length
 			i++
-
 		case length:
 			p.remainingLength += uint32(rx[i]&127) * p.lenMul
 			p.lenMul *= 128
@@ -87,18 +88,19 @@ func (s *server) parseStream(session *session, rx []byte) error {
 					session.rxState = variableHeader
 				}
 			}
-			i++
 
+			i++
 		case variableHeader:
 			switch p.controlType {
 			case CONNECT:
-				avail := uint32(len(rx) - i)
+				avail := l - i
 				toRead := p.vhLen
 				if avail < toRead {
 					toRead = avail
 				}
 
-				p.variableHeader = append(p.variableHeader, rx[i:i+int(toRead)]...)
+				p.variableHeader = append(p.variableHeader, rx[i:i+toRead]...)
+				p.remainingLength -= toRead
 				p.vhLen -= toRead
 
 				if p.vhLen == 0 {
@@ -120,12 +122,13 @@ func (s *server) parseStream(session *session, rx []byte) error {
 					session.rxState = payload
 				}
 
-				p.remainingLength -= toRead
-				i += int(toRead)
+				i += toRead
 			case PUBLISH:
 				if !p.gotVhLen {
 					p.variableHeader = append(p.variableHeader, rx[i])
 					p.vhLen++
+					p.remainingLength--
+
 					if p.vhLen == 2 {
 						// vhLen is now remaining
 						p.vhLen = uint32(binary.BigEndian.Uint16(p.variableHeader))
@@ -135,34 +138,34 @@ func (s *server) parseStream(session *session, rx []byte) error {
 						p.gotVhLen = true
 					}
 
-					p.remainingLength--
 					i++
 				} else {
-					max := len(rx)
-					if p.vhLen < uint32(max-i) {
-						max = int(p.vhLen) + i
+					avail := l - i
+					toRead := p.vhLen
+					if avail < toRead {
+						toRead = avail
 					}
 
-					p.variableHeader = append(p.variableHeader, rx[i:max]...)
-					got := uint32(max - i)
-					p.vhLen -= got
-					p.remainingLength -= got
+					p.variableHeader = append(p.variableHeader, rx[i:i+toRead]...)
+					p.remainingLength -= toRead
+					p.vhLen -= toRead
 
 					if p.vhLen == 0 {
 						p.payload = p.payload[:0]
 						session.rxState = payload
 					}
 
-					i = max
+					i += toRead
 				}
 			case SUBSCRIBE:
-				avail := uint32(len(rx) - i)
+				avail := l - i
 				toRead := p.vhLen
 				if avail < toRead {
 					toRead = avail
 				}
 
-				p.variableHeader = append(p.variableHeader, rx[i:i+int(toRead)]...)
+				p.variableHeader = append(p.variableHeader, rx[i:i+toRead]...)
+				p.remainingLength -= toRead
 				p.vhLen -= toRead
 
 				if p.vhLen == 0 {
@@ -171,8 +174,7 @@ func (s *server) parseStream(session *session, rx []byte) error {
 					session.rxState = payload
 				}
 
-				p.remainingLength -= toRead
-				i += int(toRead)
+				i += toRead
 			default:
 				// TODO: handle other variable headers
 				p.remainingLength--
@@ -185,13 +187,14 @@ func (s *server) parseStream(session *session, rx []byte) error {
 			}
 
 		case payload:
-			max := len(rx)
-			if p.remainingLength < uint32(max-i) {
-				max = int(p.remainingLength) + i
+			avail := l - i
+			toRead := p.remainingLength
+			if avail < toRead {
+				toRead = avail
 			}
 
-			p.payload = append(p.payload, rx[i:max]...)
-			p.remainingLength -= uint32(max - i)
+			p.payload = append(p.payload, rx[i:i+toRead]...)
+			p.remainingLength -= toRead
 
 			if p.remainingLength == 0 {
 				switch p.controlType {
@@ -206,7 +209,7 @@ func (s *server) parseStream(session *session, rx []byte) error {
 				session.rxState = controlAndFlags
 			}
 
-			i = max
+			i += toRead
 		}
 	}
 
@@ -232,6 +235,11 @@ func (s *server) handleSubscribe(session *session) {
 
 		i += 3 + topicL
 	}
+
+	log.WithFields(log.Fields{
+		"id":     session.clientId,
+		"Topics": topics,
+	}).Debug("Got SUBSCRIBE packet")
 
 	s.sLock.Lock()
 	for i, t := range topics {
@@ -289,7 +297,7 @@ func (s *server) handlePublish(session *session) {
 }
 
 func variableLengthEncode(l int) []byte {
-	res := make([]byte, 0, 1)
+	res := make([]byte, 0, 2)
 	for {
 		eb := l % 128
 		l = l / 128
