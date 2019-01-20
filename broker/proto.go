@@ -13,13 +13,13 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (s *server) parseStream(session *session, rx []byte) error {
-	p := &session.packet
+func (s *server) parseStream(ses *session, rx []byte) error {
+	p := &ses.packet
 	l := uint32(len(rx))
 	var i uint32
 
 	for i < l {
-		switch session.rxState {
+		switch ses.rxState {
 		case controlAndFlags:
 			p.controlType = rx[i] & 0xF0
 			p.flags = rx[i] & 0x0F
@@ -27,34 +27,45 @@ func (s *server) parseStream(session *session, rx []byte) error {
 				return fmt.Errorf("invalid control packet type: %d", p.controlType)
 			}
 
-			if p.controlType == DISCONNECT {
-				log.WithFields(log.Fields{
-					"id": session.clientId,
-				}).Debug("Got DISCONNECT packet")
-			}
-
-			if p.controlType == SUBSCRIBE && p.flags != 0x02 { // [MQTT-3.8.1-1]
-				session.close()
-				return errors.New("malformed SUBSCRIBE")
-			}
-
 			// handle first and only connect
-			if session.sentConnectPacket {
+			if ses.sentConnectPacket {
 				if p.controlType == CONNECT { // [MQTT-3.1.0-2]
 					// protocol violation
-					session.close()
+					ses.close()
 					return errors.New("client's second CONNECT packet")
 				}
 			} else {
 				if p.controlType != CONNECT { // [MQTT-3.1.0-1]
-					session.close()
+					ses.close()
 					return errors.New("client must send CONNECT packet first")
 				}
 			}
 
+			switch p.controlType {
+			case PUBLISH:
+				if (p.flags&0x08 > 0) && (p.flags&0x06 == 0) { // [MQTT-3.3.1-2]
+					ses.close()
+					return errors.New("malformed PUBLISH")
+				}
+				if p.flags&0x06 == 6 { // [MQTT-3.3.1-4]
+					ses.close()
+					return errors.New("malformed PUBLISH")
+				}
+				break
+			case SUBSCRIBE:
+				if p.flags != 0x02 { // [MQTT-3.8.1-1]
+					ses.close()
+					return errors.New("malformed SUBSCRIBE")
+				}
+			case DISCONNECT:
+				log.WithFields(log.Fields{
+					"id": ses.clientId,
+				}).Debug("Got DISCONNECT packet")
+			}
+
 			p.lenMul = 1
 			p.remainingLength = 0
-			session.rxState = length
+			ses.rxState = length
 			i++
 		case length:
 			p.remainingLength += uint32(rx[i]&127) * p.lenMul
@@ -70,22 +81,24 @@ func (s *server) parseStream(session *session, rx []byte) error {
 				case PUBLISH:
 					p.vhLen = 0 // will increase later
 					p.gotVhLen = false
+				case PUBACK:
+					p.vhLen = 2
 				case SUBSCRIBE:
 					if p.remainingLength < 5 { // [MQTT-3.8.3-3]
-						session.close()
+						ses.close()
 						return errors.New("invalid SUBSCRIBE")
 					}
 					p.vhLen = 2
 				case PINGREQ:
-					session.writePacket(pingRespPacket)
+					go ses.writePacket(pingRespPacket)
 				}
 
 				if p.remainingLength == 0 {
-					session.setDeadline()
-					session.rxState = controlAndFlags
+					ses.setDeadline()
+					ses.rxState = controlAndFlags
 				} else {
-					p.variableHeader = p.variableHeader[:0]
-					session.rxState = variableHeader
+					p.vh = p.vh[:0]
+					ses.rxState = variableHeader
 				}
 			}
 
@@ -99,39 +112,39 @@ func (s *server) parseStream(session *session, rx []byte) error {
 					toRead = avail
 				}
 
-				p.variableHeader = append(p.variableHeader, rx[i:i+toRead]...)
+				p.vh = append(p.vh, rx[i:i+toRead]...)
 				p.remainingLength -= toRead
 				p.vhLen -= toRead
 
 				if p.vhLen == 0 {
-					if !bytes.Equal(connectPacket, p.variableHeader[:7]) { // [MQTT-3.1.2-1]
-						session.sendConnack(1) // [MQTT-3.1.2-2]
-						session.close()
+					if !bytes.Equal(connectPacket, p.vh[:7]) { // [MQTT-3.1.2-1]
+						ses.sendConnack(1) // [MQTT-3.1.2-2]
+						ses.close()
 						return errors.New("bad CONNECT: invalid protocol")
 					}
 
-					session.connectFlags = p.variableHeader[7]
-					if session.connectFlags&0x01 > 0 { // [MQTT-3.1.2-3]
-						session.close()
+					ses.connectFlags = p.vh[7]
+					if ses.connectFlags&0x01 > 0 { // [MQTT-3.1.2-3]
+						ses.close()
 						return errors.New("bad CONNECT")
 					}
 
 					// [MQTT-3.1.2-24]
-					session.keepAlive = time.Duration(binary.BigEndian.Uint16(p.variableHeader[8:])) * time.Second * 3 / 2
+					ses.keepAlive = time.Duration(binary.BigEndian.Uint16(p.vh[8:])) * time.Second * 3 / 2
 					p.payload = p.payload[:0]
-					session.rxState = payload
+					ses.rxState = payload
 				}
 
 				i += toRead
 			case PUBLISH:
 				if !p.gotVhLen {
-					p.variableHeader = append(p.variableHeader, rx[i])
+					p.vh = append(p.vh, rx[i])
 					p.vhLen++
 					p.remainingLength--
 
 					if p.vhLen == 2 {
 						// vhLen is now remaining
-						p.vhLen = uint32(binary.BigEndian.Uint16(p.variableHeader))
+						p.vhLen = uint32(binary.BigEndian.Uint16(p.vh))
 						if p.flags&0x06 > 0 { // Qos > 0
 							p.vhLen += 2
 						}
@@ -146,17 +159,36 @@ func (s *server) parseStream(session *session, rx []byte) error {
 						toRead = avail
 					}
 
-					p.variableHeader = append(p.variableHeader, rx[i:i+toRead]...)
+					p.vh = append(p.vh, rx[i:i+toRead]...)
 					p.remainingLength -= toRead
 					p.vhLen -= toRead
 
 					if p.vhLen == 0 {
+						if p.flags&0x06 > 0 { // Qos > 0
+							p.pID = binary.BigEndian.Uint16(p.vh[len(p.vh)-2:])
+						}
 						p.payload = p.payload[:0]
-						session.rxState = payload
+						ses.rxState = payload
 					}
 
 					i += toRead
 				}
+			case PUBACK:
+				avail := l - i
+				toRead := p.vhLen
+				if avail < toRead {
+					toRead = avail
+				}
+
+				p.vh = append(p.vh, rx[i:i+toRead]...)
+				p.remainingLength -= toRead
+				p.vhLen -= toRead
+
+				if p.vhLen == 0 {
+					go ses.signalQoS1Done(binary.BigEndian.Uint16(p.vh))
+				}
+
+				i += toRead
 			case SUBSCRIBE:
 				avail := l - i
 				toRead := p.vhLen
@@ -164,14 +196,13 @@ func (s *server) parseStream(session *session, rx []byte) error {
 					toRead = avail
 				}
 
-				p.variableHeader = append(p.variableHeader, rx[i:i+toRead]...)
+				p.vh = append(p.vh, rx[i:i+toRead]...)
 				p.remainingLength -= toRead
 				p.vhLen -= toRead
 
 				if p.vhLen == 0 {
-					session.packet.identifier = binary.BigEndian.Uint16(p.variableHeader)
 					p.payload = p.payload[:0]
-					session.rxState = payload
+					ses.rxState = payload
 				}
 
 				i += toRead
@@ -182,8 +213,8 @@ func (s *server) parseStream(session *session, rx []byte) error {
 			}
 
 			if p.remainingLength == 0 {
-				session.setDeadline()
-				session.rxState = controlAndFlags
+				ses.setDeadline()
+				ses.rxState = controlAndFlags
 			}
 
 		case payload:
@@ -199,14 +230,14 @@ func (s *server) parseStream(session *session, rx []byte) error {
 			if p.remainingLength == 0 {
 				switch p.controlType {
 				case CONNECT:
-					s.handleConnect(session)
+					s.handleConnect(ses)
 				case PUBLISH:
-					s.handlePublish(session)
+					s.handlePublish(ses)
 				case SUBSCRIBE:
-					s.handleSubscribe(session)
+					s.handleSubscribe(ses)
 				}
-				session.setDeadline()
-				session.rxState = controlAndFlags
+				ses.setDeadline()
+				ses.rxState = controlAndFlags
 			}
 
 			i += toRead
@@ -216,8 +247,8 @@ func (s *server) parseStream(session *session, rx []byte) error {
 	return nil
 }
 
-func (s *server) handleSubscribe(session *session) {
-	p := session.packet.payload
+func (s *server) handleSubscribe(ses *session) {
+	p := ses.packet.payload
 	topics := make([]string, 0, 2)
 	qoss := make([]uint8, 0, 2)
 	i := 0
@@ -227,9 +258,12 @@ func (s *server) handleSubscribe(session *session) {
 		topicEnd := i + 2 + topicL
 		topics = append(topics, string(p[i+2:topicEnd]))
 		if p[topicEnd]&0xFC != 0 { // [MQTT-3-8.3-4]
-			session.close()
+			ses.close()
 			log.Println("invalid subscribe QoS byte")
 			return
+		}
+		if p[topicEnd] == 2 {
+			p[topicEnd] = 1 // Grant max 1 for now. TODO: Support QoS 2
 		}
 		qoss = append(qoss, p[topicEnd])
 
@@ -237,63 +271,32 @@ func (s *server) handleSubscribe(session *session) {
 	}
 
 	log.WithFields(log.Fields{
-		"id":     session.clientId,
+		"id":     ses.clientId,
 		"Topics": topics,
 	}).Debug("Got SUBSCRIBE packet")
 
-	s.sLock.Lock()
-	for i, t := range topics {
-		cl, ok := s.subscriptions[t]
-		if !ok {
-			s.subscriptions[t] = make(map[string]uint8, 8)
-			cl = s.subscriptions[t]
-		}
+	go s.addSubscriptions(topics, qoss, ses.clientId)
 
-		cl[session.clientId] = qoss[i]
-	}
-	s.sLock.Unlock()
+	// [MQTT-3.8.4-1, 4-4, 4-5, 4-6]
+	tl := len(topics)
+	subackP := make([]byte, 1, tl+7)
+	subackP[0] = SUBACK
+	subackP = append(subackP, variableLengthEncode(tl+2)...)
+	subackP = append(subackP, ses.packet.vh[0], ses.packet.vh[1]) // [MQTT-3.8.4-2]
+	subackP = append(subackP, qoss...)                            // [MQTT-3.9.3-1]
 
-	id := session.packet.identifier
-	session.writePacket([]byte{SUBACK, 3, uint8(id >> 8), uint8(id), 0})
+	go ses.writePacket(subackP)
 }
 
-func (s *server) handlePublish(session *session) {
-	p := &session.packet
-	vh := p.variableHeader
-	msg := p.payload
-	mLen := len(msg)
-	topicLen := int(binary.BigEndian.Uint16(vh))
-	topic := string(vh[2 : topicLen+2])
+func (s *server) handlePublish(ses *session) {
+	p := &ses.packet
+	s.publishToSubscribers(p, ses.clientId)
 
-	/*if p.flags&0x06 > 0 { // Qos > 0
-		// uint16(vh[len(vh)-2]<<8) | uint16(vh[len(vh)-1])
-		p.identifier = binary.BigEndian.Uint16(vh[len(vh)-2:])
-	}*/
-
-	log.WithFields(log.Fields{
-		"id":      session.clientId,
-		"Topic":   topic,
-		"Payload": string(msg),
-	}).Debug("Got PUBLISH packet")
-
-	pubPack := make([]byte, 1, 7+topicLen+mLen) // ctrl 1 + remainLen 4max + topicLen 2 + topicLen + msgLen
-	pubPack[0] = PUBLISH
-	pubPack = append(pubPack, variableLengthEncode(topicLen+mLen+2)...)
-	pubPack = append(pubPack, vh[:topicLen+2]...) // 2 bytes + topic
-	pubPack = append(pubPack, msg...)
-
-	go func(p []byte, topic string) {
-		s.sLock.RLock()
-		s.cLock.RLock()
-		for c := range s.subscriptions[topic] {
-			client, ok := s.clients[c]
-			if ok {
-				client.writePacket(p)
-			}
-		}
-		s.sLock.RUnlock()
-		s.cLock.RUnlock()
-	}(pubPack, topic)
+	switch p.flags & 0x06 {
+	case 0x02: // QoS 1
+		go ses.writePacket([]byte{PUBACK, 2, byte(p.pID >> 8), byte(p.pID)})
+	case 0x04: // QoS 2
+	}
 }
 
 func variableLengthEncode(l int) []byte {
@@ -314,36 +317,36 @@ func variableLengthEncode(l int) []byte {
 
 var unNamedClients int
 
-func (s *server) handleConnect(session *session) {
-	p := session.packet.payload
+func (s *server) handleConnect(ses *session) {
+	p := ses.packet.payload
 	if len(p) < 2 { // [MQTT-3.1.3-3]
-		session.close() // close conn. throw all away
+		ses.close() // close conn. throw all away
 		log.Println("CONNECT packet payload error")
 		return
 	}
 
 	clientIdLen := binary.BigEndian.Uint16(p)
 	if clientIdLen > 0 {
-		session.clientId = string(p[2 : clientIdLen+2])
+		ses.clientId = string(p[2 : clientIdLen+2])
 	} else {
-		if session.persistent() { // [MQTT-3.1.3-7]
-			session.sendConnack(2) // [MQTT-3.1.3-8]
-			session.close()
+		if ses.persistent() { // [MQTT-3.1.3-7]
+			ses.sendConnack(2) // [MQTT-3.1.3-8]
+			ses.close()
 			log.Println("CONNECT packet wrong")
 			return
 		}
 
-		session.clientId = fmt.Sprintf("noname-%d-%d", unNamedClients, time.Now().UnixNano()/100000)
+		ses.clientId = fmt.Sprintf("noname-%d-%d", unNamedClients, time.Now().UnixNano()/100000)
 		unNamedClients++
 	}
 
 	// TODO: Will Topic, Will Msg, User Name, Password
 
-	session.sentConnectPacket = true
-	session.setDeadline()
-	s.addClient(session)
-	session.sendConnack(0)
-	go session.startWriter()
+	ses.sentConnectPacket = true
+	ses.setDeadline()
+	s.addClient(ses)
+	ses.sendConnack(0)
+	go ses.startWriter()
 }
 
 func (s *server) handleNewConn(conn net.Conn) {
@@ -353,11 +356,10 @@ func (s *server) handleNewConn(conn net.Conn) {
 		tx:            bufio.NewWriter(conn),
 		txFlush:       make(chan struct{}, 1),
 		subscriptions: make(map[string]struct{}),
-		packet: packet{
-			variableHeader: make([]byte, 0, 512),
-			payload:        make([]byte, 0, 512),
-		},
+		qos1Queue:     make(map[uint16]chan<- struct{}, 2),
 	}
+	newSession.packet.vh = make([]byte, 0, 512)
+	newSession.packet.vh = make([]byte, 0, 512)
 
 	rx := make([]byte, 1024)
 	for {

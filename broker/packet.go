@@ -37,10 +37,10 @@ type packet struct {
 	lenMul          uint32
 
 	// Variable header
-	vhLen          uint32 // connect: countdown from 10, publish:
-	gotVhLen       bool   // publish packet
-	variableHeader []byte // publish packet
-	identifier     uint16 // publish with QoS>0, etc.
+	vhLen    uint32
+	gotVhLen bool // publish packet
+	vh       []byte
+	pID      uint16 // subscribe, unsubscribe, publish with QoS>0.
 
 	payload []byte
 }

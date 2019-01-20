@@ -25,7 +25,10 @@ type session struct {
 
 	clientId      string
 	subscriptions map[string]struct{} // unused. list of channels
-	// QoS 1 & 2 unacknowledged and pending
+
+	publishId uint16
+	qos1Queue map[uint16]chan<- struct{} // used to send done signal
+	qLock     sync.Mutex
 }
 
 func (s *session) close() {
@@ -51,6 +54,42 @@ func (s *session) sendConnack(errCode uint8) error {
 
 func (s *session) persistent() bool {
 	return s.connectFlags&0x02 == 0
+}
+
+func (s *session) sendQoS1Message(pubP []byte, pubId uint16) {
+	done := make(chan struct{})
+	s.qLock.Lock()
+	s.qos1Queue[s.publishId] = done
+	s.qLock.Unlock()
+
+	s.writePacket(pubP)
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-time.After(time.Second * 20): // what should this be?
+			pubP[1] |= 0x08 // DUP
+			if err := s.writePacket(pubP); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *session) signalQoS1Done(pubId uint16) {
+	s.qLock.Lock()
+	done, ok := s.qos1Queue[pubId]
+	if ok {
+		close(done)
+		delete(s.qos1Queue, pubId)
+	} else {
+		log.WithFields(log.Fields{
+			"client":   s.clientId,
+			"packetID": pubId,
+		}).Error("Got PUBACK packet for none existing packet")
+	}
+	s.qLock.Unlock()
 }
 
 func (s *session) startWriter() {
