@@ -83,6 +83,7 @@ func (s *session) qos0Pump() {
 
 func (s *session) qos1Pump() {
 	c := s.client
+	started := false
 	for {
 		c.q1Lock.Lock()
 		if s.dead {
@@ -100,19 +101,24 @@ func (s *session) qos1Pump() {
 
 		for p1 := c.q1Q.Front(); p1 != nil; p1 = p1.Next() {
 			p := p1.Value.(*qosPub)
-			if p.sent {
-				continue
+			if started {
+				if p.sent {
+					continue
+				}
+			} else {
+				if p.sent {
+					p.p[0] |= 0x08 // DUP
+				}
 			}
-
 			if err := s.writePacket(p.p); err != nil {
 				c.q1Lock.Unlock()
 				return
 			}
-
 			p.sent = true
 			go s.qos1Monitor(p)
 		}
 		c.q1Lock.Unlock()
+		started = true
 	}
 }
 

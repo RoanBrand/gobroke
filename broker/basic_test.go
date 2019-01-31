@@ -43,7 +43,7 @@ func TestRejoin(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		err = c1.readQ1(&c1PubReadId)
+		err = c1.readQ1(&c1PubReadId, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -62,10 +62,112 @@ func TestRejoin(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err = c1.readQ1(&c1PubReadId)
+		err = c1.readQ1(&c1PubReadId, false, true)
 		if err != nil {
 			t.Fatal(err)
 		}
+	}
+
+	select {
+	case err := <-errPipe:
+		t.Fatal(err)
+	default:
+	}
+}
+
+func TestResendPendingQos1AtReconnect(t *testing.T) {
+	logrus.SetLevel(logrus.DebugLevel)
+	s := broker.NewServer()
+
+	errPipe := make(chan error)
+	go func() {
+		errPipe <- s.Start()
+	}()
+
+	var c1PubReadId uint16
+
+	// startup
+	c1, err := doConnect('1', 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = c1.subQ1()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c2, err := doConnect('2', 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1 with puback
+	err = c2.pubQ1()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = c1.readQ1(&c1PubReadId, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 2,3 without puback
+	err = c2.pubQ1()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = c1.readQ1(&c1PubReadId, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = c2.pubQ1()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = c1.readQ1(&c1PubReadId, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c1.conn.Close()
+
+	// 4, 5 no receive
+	err = c2.pubQ1()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c2.pubQ1()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c1, err = doConnect('1', 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// receive 2,3,4,5
+	c1PubReadId = 1
+	err = c1.readQ1(&c1PubReadId, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c1.readQ1(&c1PubReadId, true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c1.readQ1(&c1PubReadId, false, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c1.readQ1(&c1PubReadId, false, true)
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	select {
@@ -150,7 +252,7 @@ func (c *client) subQ1() error {
 	return nil
 }
 
-func (c *client) readQ1(pubReadId *uint16) error {
+func (c *client) readQ1(pubReadId *uint16, dup, sendPuback bool) error {
 	*pubReadId++
 
 	nRx, err := c.conn.Read(c.rx)
@@ -158,13 +260,19 @@ func (c *client) readQ1(pubReadId *uint16) error {
 		return err
 	}
 
-	if !bytes.Equal(c.rx[:nRx], []byte{broker.PUBLISH | 2, 8, 0, 1, 't', uint8(*pubReadId >> 8), uint8(*pubReadId), 'M', 'S', 'G'}) {
-		return fmt.Errorf("publish rx error: %v", c.rx[:nRx])
+	pub := []byte{broker.PUBLISH | 2, 8, 0, 1, 't', uint8(*pubReadId >> 8), uint8(*pubReadId), 'M', 'S', 'G'}
+	if dup {
+		pub[0] |= 0x08
+	}
+	if !bytes.Equal(c.rx[:nRx], pub) {
+		return fmt.Errorf("publish rx error, is: %v, must be %v", c.rx[:nRx], pub)
 	}
 
-	_, err = c.conn.Write([]byte{broker.PUBACK, 2, uint8(*pubReadId >> 8), uint8(*pubReadId)})
-	if err != nil {
-		return err
+	if sendPuback {
+		_, err = c.conn.Write([]byte{broker.PUBACK, 2, uint8(*pubReadId >> 8), uint8(*pubReadId)})
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
