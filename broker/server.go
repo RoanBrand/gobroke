@@ -3,23 +3,32 @@ package broker
 import (
 	"encoding/binary"
 	"net"
-	"sync"
 
 	log "github.com/sirupsen/logrus"
 )
 
-type server struct {
-	clients map[string]*session
-	cLock   sync.RWMutex
+const (
+	serverBuffer = 1024
+)
 
+type server struct {
+	clients       map[string]*client
 	subscriptions map[string]map[string]uint8 // topic -> subscribed client id -> QoS level
-	sLock         sync.RWMutex
+
+	register   chan *session
+	unregister chan *session
+	subs       chan *subList
+	pubs       chan *pub
 }
 
 func NewServer() *server {
 	return &server{
-		clients:       make(map[string]*session, 16),
+		clients:       make(map[string]*client, 16),
 		subscriptions: make(map[string]map[string]uint8, 4),
+		register:      make(chan *session),
+		unregister:    make(chan *session, 32),
+		subs:          make(chan *subList),
+		pubs:          make(chan *pub, serverBuffer),
 	}
 }
 
@@ -29,77 +38,118 @@ func (s *server) Start() error {
 		return err
 	}
 
-	for {
-		conn, err := l.Accept()
-		if err != nil {
-			return err
-		}
+	er := make(chan error)
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				er <- err
+			}
 
-		go s.handleNewConn(conn)
+			go s.startSession(conn)
+		}
+	}()
+
+	go s.run(er)
+	return <-er
+}
+
+func (s *server) run(chan error) {
+	for {
+		select {
+		case ses := <-s.register:
+			s.addSession(ses)
+		case c := <-s.unregister:
+			s.removeClient(c.clientId)
+		case sl := <-s.subs:
+			s.addSubscriptions(sl)
+		case p := <-s.pubs:
+			s.forwardToSubscribers(p)
+		}
 	}
 }
 
-func (s *server) addClient(newClient *session) {
+func (s *server) addSession(newses *session) {
+	newses.connectSent = true
 	log.WithFields(log.Fields{
-		"id": newClient.clientId,
-	}).Info("New client")
+		"client": newses.clientId,
+	}).Info("New session")
 
 	// [MQTT-3.1.2-4]
-	s.cLock.Lock()
-	oldSession, present := s.clients[newClient.clientId]
+	c, present := s.clients[newses.clientId]
 	if present {
 		log.WithFields(log.Fields{
-			"id": newClient.clientId,
-		}).Debug("Old session present. Closing that connection")
-		oldSession.close()
+			"client": newses.clientId,
+		}).Debug("Old session present")
 
-		if newClient.persistent() && oldSession.persistent() {
-			newClient.notFirstSession = true
+		newses.notFirstSession = true
+		c.session.stop()
+		if newses.persistent() && c.session.persistent() {
 			log.WithFields(log.Fields{
-				"id": newClient.clientId,
-			}).Debug("New client inheriting old session state")
-			newClient.subscriptions = oldSession.subscriptions
+				"client": newses.clientId,
+			}).Debug("New session inheriting previous client state")
+		} else {
+			c.clear <- struct{}{}
+			<-c.clear
 		}
+		c.replaceSession(newses)
+	} else {
+		s.clients[newses.clientId] = newClient(newses)
+		c = s.clients[newses.clientId]
 	}
 
-	s.clients[newClient.clientId] = newClient
-	s.cLock.Unlock()
+	newses.client = c
+	newses.sendConnack(0)
+	newses.run()
 }
 
 func (s *server) removeClient(id string) {
 	log.WithFields(log.Fields{
-		"id": id,
+		"client": id,
 	}).Debug("Deleting client session (CleanSession)")
-	s.cLock.Lock()
 	delete(s.clients, id)
-	s.cLock.Unlock()
 }
 
-func (s *server) addSubscriptions(topics []string, qoss []uint8, clientId string) {
-	s.sLock.Lock()
-	for i, t := range topics {
+type subList struct {
+	cId    string
+	topics []string
+	qoss   []uint8
+}
+
+func (s *server) addSubscriptions(subs *subList) {
+	for i, t := range subs.topics {
 		cl, ok := s.subscriptions[t]
 		if !ok {
 			s.subscriptions[t] = make(map[string]uint8, 8)
 			cl = s.subscriptions[t]
 		}
 
-		cl[clientId] = qoss[i]
+		cl[subs.cId] = subs.qoss[i]
 	}
-	s.sLock.Unlock()
+}
+
+type pub struct {
+	topic  string
+	pacs   [][]byte
+	pubQoS uint8
+	idLoc  int
 }
 
 func (s *server) publishToSubscribers(p *packet, from string) {
 	topicLen := int(binary.BigEndian.Uint16(p.vh))
 	topic := string(p.vh[2 : topicLen+2])
+	qos := (p.flags & 0x06) >> 1
 
-	log.WithFields(log.Fields{
-		"id":        from,
-		"Topic":     topic,
-		"QoS":       p.flags & 0x06 >> 1,
-		"Duplicate": p.flags&0x08 > 0,
-		"Payload":   string(p.payload),
-	}).Debug("Got PUBLISH packet")
+	lf := log.Fields{
+		"client":  from,
+		"topic":   topic,
+		"QoS":     qos,
+		"payload": string(p.payload),
+	}
+	if p.flags&0x08 > 0 {
+		lf["duplicate"] = true
+	}
+	log.WithFields(lf).Debug("Got PUBLISH packet")
 
 	pacs := make([][]byte, 3)
 	pLen := len(p.payload)
@@ -113,7 +163,7 @@ func (s *server) publishToSubscribers(p *packet, from string) {
 
 	// QoS 1
 	var idLoc int
-	if p.flags&0x06 > 0 {
+	if qos > 0 {
 		pacs[1] = make([]byte, 1, 9+topicLen+pLen) // ctrl 1 + remainLen 4max + topicLen 2 + topicLen + pID 2 + msgLen
 		pacs[1][0] = PUBLISH | 0x02
 		pacs[1] = append(pacs[1], variableLengthEncode(topicLen+pLen+4)...)
@@ -123,37 +173,13 @@ func (s *server) publishToSubscribers(p *packet, from string) {
 		pacs[1] = append(pacs[1], p.payload...)
 	}
 
-	go s.forwardToSubscribers(topic, pacs, p.flags&0x06>>1, idLoc)
+	s.pubs <- &pub{topic: topic, pacs: pacs, pubQoS: qos, idLoc: idLoc}
 }
 
-func (s *server) forwardToSubscribers(topic string, pacs [][]byte, pubQoS uint8, idLoc int) {
-	s.sLock.RLock()
-	s.cLock.RLock()
-
-	for cId, maxQoS := range s.subscriptions[topic] {
-		client, ok := s.clients[cId]
-		if !ok {
-			continue
-		}
-
-		finalQoS := pubQoS
-		if maxQoS < pubQoS {
-			finalQoS = maxQoS
-		}
-		switch finalQoS {
-		case 0:
-			client.writePacket(pacs[0])
-		case 1:
-			pubP := make([]byte, len(pacs[1]))
-			copy(pubP, pacs[1])
-			client.publishId++
-			pubP[idLoc] = uint8(client.publishId >> 8)
-			pubP[idLoc+1] = uint8(client.publishId)
-
-			go client.sendQoS1Message(pubP, client.publishId)
+func (s *server) forwardToSubscribers(p *pub) {
+	for cId := range s.subscriptions[p.topic] {
+		if c, ok := s.clients[cId]; ok {
+			c.pubRX <- p
 		}
 	}
-
-	s.sLock.RUnlock()
-	s.cLock.RUnlock()
 }

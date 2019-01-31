@@ -1,11 +1,11 @@
 # gobroke
 My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 
-##TODO
+## TODO
 * Config
 * OS Service
 * Topic Path system & Wildcards
-* Qos 1 & 2
+* Qos 2
 * TLS
 * Websocket
 * Persistence to survive restart
