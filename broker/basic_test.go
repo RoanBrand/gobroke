@@ -12,7 +12,10 @@ import (
 
 func TestRejoin(t *testing.T) {
 	logrus.SetLevel(logrus.DebugLevel)
-	s := broker.NewServer()
+	s, err := broker.NewServer("config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	errPipe := make(chan error)
 	go func() {
@@ -77,7 +80,10 @@ func TestRejoin(t *testing.T) {
 
 func TestResendPendingQos1AtReconnect(t *testing.T) {
 	logrus.SetLevel(logrus.DebugLevel)
-	s := broker.NewServer()
+	s, err := broker.NewServer("config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	errPipe := make(chan error)
 	go func() {

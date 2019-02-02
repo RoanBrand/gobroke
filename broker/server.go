@@ -1,9 +1,13 @@
 package broker
 
 import (
+	"crypto/tls"
 	"encoding/binary"
+	"io/ioutil"
 	"net"
+	"os"
 
+	"github.com/RoanBrand/gobroke/config"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -12,6 +16,7 @@ const (
 )
 
 type server struct {
+	config        *config.Config
 	clients       map[string]*client
 	subscriptions map[string]map[string]uint8 // topic -> subscribed client id -> QoS level
 
@@ -21,40 +26,47 @@ type server struct {
 	pubs       chan *pub
 }
 
-func NewServer() *server {
+func NewServer(confPath string) (*server, error) {
+	conf, err := config.New(confPath)
+	if err != nil {
+		return nil, err
+	}
+
 	return &server{
+		config:        conf,
 		clients:       make(map[string]*client, 16),
 		subscriptions: make(map[string]map[string]uint8, 4),
 		register:      make(chan *session),
 		unregister:    make(chan *session, 32),
 		subs:          make(chan *subList),
 		pubs:          make(chan *pub, serverBuffer),
-	}
+	}, nil
 }
 
 func (s *server) Start() error {
-	l, err := net.Listen("tcp", ":1883")
-	if err != nil {
+	er := make(chan error)
+
+	if err := s.setupTCP(er); err != nil {
 		return err
 	}
-
-	er := make(chan error)
-	go func() {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				er <- err
-			}
-
-			go s.startSession(conn)
-		}
-	}()
+	if err := s.setupTLS(er); err != nil {
+		return err
+	}
 
 	go s.run(er)
 	return <-er
 }
 
 func (s *server) run(chan error) {
+	lf := make(log.Fields, 4)
+	if s.config.TCP.Enabled {
+		lf["tcp_address"] = s.config.TCP.Address
+	}
+	if s.config.TLS.Enabled {
+		lf["tls_address"] = s.config.TLS.Address
+	}
+	log.WithFields(lf).Info("Starting MQTT server")
+
 	for {
 		select {
 		case ses := <-s.register:
@@ -67,6 +79,82 @@ func (s *server) run(chan error) {
 			s.forwardToSubscribers(p)
 		}
 	}
+}
+
+func (s *server) setupTCP(errPipe chan error) error {
+	if !s.config.TCP.Enabled {
+		return nil
+	}
+
+	l, err := net.Listen("tcp", s.config.TCP.Address)
+	if err != nil {
+		return err
+	}
+
+	go func(l net.Listener) {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				errPipe <- err
+				return
+			}
+
+			go s.startSession(conn)
+		}
+	}(l)
+
+	return nil
+}
+
+func (s *server) setupTLS(errPipe chan error) error {
+	if !s.config.TLS.Enabled {
+		return nil
+	}
+
+	cf, err := os.Open(s.config.TLS.Cert)
+	if err != nil {
+		return err
+	}
+	defer cf.Close()
+	kf, err := os.Open(s.config.TLS.Key)
+	if err != nil {
+		return err
+	}
+	defer kf.Close()
+
+	cert, err := ioutil.ReadAll(cf)
+	if err != nil {
+		return err
+	}
+	key, err := ioutil.ReadAll(kf)
+	if err != nil {
+		return err
+	}
+
+	kp, err := tls.X509KeyPair(cert, key)
+	if err != nil {
+		return err
+	}
+	config := tls.Config{Certificates: []tls.Certificate{kp}}
+
+	l, err := tls.Listen("tcp", s.config.TLS.Address, &config)
+	if err != nil {
+		return err
+	}
+
+	go func(l net.Listener) {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				errPipe <- err
+				return
+			}
+
+			go s.startSession(conn)
+		}
+	}(l)
+
+	return nil
 }
 
 func (s *server) addSession(newses *session) {

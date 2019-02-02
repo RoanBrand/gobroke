@@ -40,16 +40,21 @@ func (s *session) run() {
 func (s *session) stop() {
 	s.onlyOnce.Do(func() {
 		s.conn.Close()
-		s.client.q0Lock.Lock()
-		s.client.q1Lock.Lock()
-		s.client.txLock.Lock()
+		c := s.client
+		if c != nil {
+			c.q0Lock.Lock()
+			c.q1Lock.Lock()
+			c.txLock.Lock()
+		}
 		s.dead = true
-		s.client.txFlush <- struct{}{}
-		s.client.txLock.Unlock()
-		s.client.q1Cond.Signal()
-		s.client.q1Lock.Unlock()
-		s.client.q0Cond.Signal()
-		s.client.q0Lock.Unlock()
+		if c != nil {
+			c.txFlush <- struct{}{}
+			c.txLock.Unlock()
+			c.q1Cond.Signal()
+			c.q1Lock.Unlock()
+			c.q0Cond.Signal()
+			c.q0Lock.Unlock()
+		}
 	})
 }
 

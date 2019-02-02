@@ -1,0 +1,12 @@
+{
+	"tcp": {
+		"enabled": true,
+		"address": "localhost:1883"
+	},
+	"tls": {
+		"enabled": true,
+		"address": ":8883",
+		"cert": "certs/example.crt",
+		"key": "certs/example.key"
+	}
+}

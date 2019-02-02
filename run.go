@@ -7,8 +7,10 @@ import (
 
 func main() {
 	log.SetLevel(log.DebugLevel)
-	s := broker.NewServer()
+	s, err := broker.NewServer("config.json")
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	log.Println("Starting MQTT server on port 1883")
 	log.Fatal(s.Start())
 }
