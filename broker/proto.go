@@ -14,7 +14,7 @@ func protocolViolation(msg string) error {
 	return errors.New("client protocol violation: " + msg)
 }
 
-func (s *server) parseStream(ses *session, rx []byte) error {
+func (s *Server) parseStream(ses *session, rx []byte) error {
 	p := &ses.packet
 	l := uint32(len(rx))
 	var i uint32
@@ -253,7 +253,7 @@ func (s *server) parseStream(ses *session, rx []byte) error {
 
 var unNamedClients int
 
-func (s *server) handleConnect(ses *session) error {
+func (s *Server) handleConnect(ses *session) error {
 	p := ses.packet.payload
 	if len(p) < 2 { // [MQTT-3.1.3-3]
 		return protocolViolation("malformed CONNECT payload")
@@ -280,7 +280,7 @@ func (s *server) handleConnect(ses *session) error {
 	return nil
 }
 
-func (s *server) handlePublish(ses *session) error {
+func (s *Server) handlePublish(ses *session) error {
 	p := &ses.packet
 	s.publishToSubscribers(p, ses.clientId)
 
@@ -293,7 +293,7 @@ func (s *server) handlePublish(ses *session) error {
 	return nil
 }
 
-func (s *server) handleSubscribe(ses *session) error {
+func (s *Server) handleSubscribe(ses *session) error {
 	p := ses.packet.payload
 	topics := make([]string, 0, 2)
 	qoss := make([]uint8, 0, 2)

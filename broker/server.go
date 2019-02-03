@@ -3,6 +3,7 @@ package broker
 import (
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"io/ioutil"
 	"net"
 	"os"
@@ -16,7 +17,7 @@ const (
 	serverBuffer = 1024
 )
 
-type server struct {
+type Server struct {
 	config        *config.Config
 	clients       map[string]*client
 	subscriptions map[string]map[string]uint8 // topic -> subscribed client id -> QoS level
@@ -30,13 +31,35 @@ type server struct {
 	tcpL, tlsL net.Listener
 }
 
-func NewServer(confPath string) (*server, error) {
+func NewServer(confPath string) (*Server, error) {
 	conf, err := config.New(confPath)
 	if err != nil {
 		return nil, err
 	}
 
-	return &server{
+	if conf.Log.File != "" {
+		f, err := os.OpenFile(conf.Log.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return nil, err
+		}
+		log.SetOutput(f)
+	}
+	if conf.Log.Level != "" {
+		switch strings.ToLower(conf.Log.Level) {
+		case "error":
+			log.SetLevel(log.ErrorLevel)
+		case "warn":
+			log.SetLevel(log.WarnLevel)
+		case "info":
+			log.SetLevel(log.InfoLevel)
+		case "debug":
+			log.SetLevel(log.DebugLevel)
+		default:
+			return nil, errors.New("unknown log level: " + conf.Log.Level)
+		}
+	}
+
+	s := Server{
 		config:        conf,
 		clients:       make(map[string]*client, 16),
 		subscriptions: make(map[string]map[string]uint8, 4),
@@ -45,22 +68,25 @@ func NewServer(confPath string) (*server, error) {
 		unregister:    make(chan *session, 32),
 		subs:          make(chan *subList),
 		pubs:          make(chan *pub, serverBuffer),
-	}, nil
-}
+	}
 
-func (s *server) Start() error {
 	if err := s.setupTCP(); err != nil {
-		return err
+		return nil, err
 	}
 	if err := s.setupTLS(); err != nil {
-		return err
+		return nil, err
 	}
 
+	return &s, nil
+}
+
+func (s *Server) Start() error {
 	go s.run()
 	return <-s.errs
 }
 
-func (s *server) Stop() {
+func (s *Server) Stop() {
+	log.Info("Shutting down MQTT server")
 	if s.tcpL != nil {
 		s.tcpL.Close()
 	}
@@ -69,7 +95,7 @@ func (s *server) Stop() {
 	}
 }
 
-func (s *server) run() {
+func (s *Server) run() {
 	lf := make(log.Fields, 4)
 	if s.config.TCP.Enabled {
 		lf["tcp_address"] = s.config.TCP.Address
@@ -93,7 +119,7 @@ func (s *server) run() {
 	}
 }
 
-func (s *server) setupTCP() error {
+func (s *Server) setupTCP() error {
 	if !s.config.TCP.Enabled {
 		return nil
 	}
@@ -108,7 +134,7 @@ func (s *server) setupTCP() error {
 	return nil
 }
 
-func (s *server) setupTLS() error {
+func (s *Server) setupTLS() error {
 	if !s.config.TLS.Enabled {
 		return nil
 	}
@@ -149,7 +175,7 @@ func (s *server) setupTLS() error {
 	return nil
 }
 
-func (s *server) startDispatcher(l net.Listener) {
+func (s *Server) startDispatcher(l net.Listener) {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -164,7 +190,7 @@ func (s *server) startDispatcher(l net.Listener) {
 	}
 }
 
-func (s *server) addSession(newses *session) {
+func (s *Server) addSession(newses *session) {
 	newses.connectSent = true
 	log.WithFields(log.Fields{
 		"client": newses.clientId,
@@ -198,7 +224,7 @@ func (s *server) addSession(newses *session) {
 	newses.run()
 }
 
-func (s *server) removeClient(id string) {
+func (s *Server) removeClient(id string) {
 	log.WithFields(log.Fields{
 		"client": id,
 	}).Debug("Deleting client session (CleanSession)")
@@ -211,7 +237,7 @@ type subList struct {
 	qoss   []uint8
 }
 
-func (s *server) addSubscriptions(subs *subList) {
+func (s *Server) addSubscriptions(subs *subList) {
 	for i, t := range subs.topics {
 		cl, ok := s.subscriptions[t]
 		if !ok {
@@ -230,7 +256,7 @@ type pub struct {
 	idLoc  int
 }
 
-func (s *server) publishToSubscribers(p *packet, from string) {
+func (s *Server) publishToSubscribers(p *packet, from string) {
 	topicLen := int(binary.BigEndian.Uint16(p.vh))
 	topic := string(p.vh[2 : topicLen+2])
 	qos := (p.flags & 0x06) >> 1
@@ -271,7 +297,7 @@ func (s *server) publishToSubscribers(p *packet, from string) {
 	s.pubs <- &pub{topic: topic, pacs: pacs, pubQoS: qos, idLoc: idLoc}
 }
 
-func (s *server) forwardToSubscribers(p *pub) {
+func (s *Server) forwardToSubscribers(p *pub) {
 	for cId := range s.subscriptions[p.topic] {
 		if c, ok := s.clients[cId]; ok {
 			c.pubRX <- p

@@ -6,6 +6,7 @@
 *.njsproj
 *.sln
 *.sw*
+*.log
 
 # Binaries
 gobroke.exe

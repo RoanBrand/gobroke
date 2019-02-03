@@ -19,6 +19,11 @@ type Config struct {
 		Cert    string `json:"cert"`
 		Key     string `json:"key"`
 	} `json:"tls"`
+
+	Log struct {
+		File  string `json:"file"`
+		Level string `json:"level"`
+	} `json:"log"`
 }
 
 func New(fPath string) (*Config, error) {

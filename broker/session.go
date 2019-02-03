@@ -185,7 +185,7 @@ func (s *session) writePacket(p []byte) error {
 	return nil
 }
 
-func (s *server) startSession(conn net.Conn) {
+func (s *Server) startSession(conn net.Conn) {
 	conn.SetReadDeadline(time.Now().Add(time.Second * 20)) // CONNECT packet timeout
 	ns := session{conn: conn}
 	ns.packet.vh = make([]byte, 0, 512)
