@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"strings"
 
 	"github.com/RoanBrand/gobroke/config"
 	log "github.com/sirupsen/logrus"
@@ -20,10 +21,13 @@ type server struct {
 	clients       map[string]*client
 	subscriptions map[string]map[string]uint8 // topic -> subscribed client id -> QoS level
 
+	errs       chan error
 	register   chan *session
 	unregister chan *session
 	subs       chan *subList
 	pubs       chan *pub
+
+	tcpL, tlsL net.Listener
 }
 
 func NewServer(confPath string) (*server, error) {
@@ -36,6 +40,7 @@ func NewServer(confPath string) (*server, error) {
 		config:        conf,
 		clients:       make(map[string]*client, 16),
 		subscriptions: make(map[string]map[string]uint8, 4),
+		errs:          make(chan error),
 		register:      make(chan *session),
 		unregister:    make(chan *session, 32),
 		subs:          make(chan *subList),
@@ -44,20 +49,27 @@ func NewServer(confPath string) (*server, error) {
 }
 
 func (s *server) Start() error {
-	er := make(chan error)
-
-	if err := s.setupTCP(er); err != nil {
+	if err := s.setupTCP(); err != nil {
 		return err
 	}
-	if err := s.setupTLS(er); err != nil {
+	if err := s.setupTLS(); err != nil {
 		return err
 	}
 
-	go s.run(er)
-	return <-er
+	go s.run()
+	return <-s.errs
 }
 
-func (s *server) run(chan error) {
+func (s *server) Stop() {
+	if s.tcpL != nil {
+		s.tcpL.Close()
+	}
+	if s.tlsL != nil {
+		s.tlsL.Close()
+	}
+}
+
+func (s *server) run() {
 	lf := make(log.Fields, 4)
 	if s.config.TCP.Enabled {
 		lf["tcp_address"] = s.config.TCP.Address
@@ -81,7 +93,7 @@ func (s *server) run(chan error) {
 	}
 }
 
-func (s *server) setupTCP(errPipe chan error) error {
+func (s *server) setupTCP() error {
 	if !s.config.TCP.Enabled {
 		return nil
 	}
@@ -91,22 +103,12 @@ func (s *server) setupTCP(errPipe chan error) error {
 		return err
 	}
 
-	go func(l net.Listener) {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				errPipe <- err
-				return
-			}
-
-			go s.startSession(conn)
-		}
-	}(l)
-
+	s.tcpL = l
+	go s.startDispatcher(l)
 	return nil
 }
 
-func (s *server) setupTLS(errPipe chan error) error {
+func (s *server) setupTLS() error {
 	if !s.config.TLS.Enabled {
 		return nil
 	}
@@ -142,19 +144,24 @@ func (s *server) setupTLS(errPipe chan error) error {
 		return err
 	}
 
-	go func(l net.Listener) {
-		for {
-			conn, err := l.Accept()
-			if err != nil {
-				errPipe <- err
-				return
-			}
-
-			go s.startSession(conn)
-		}
-	}(l)
-
+	s.tlsL = l
+	go s.startDispatcher(l)
 	return nil
+}
+
+func (s *server) startDispatcher(l net.Listener) {
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			if strings.Contains(err.Error(), "use of closed") {
+				err = nil
+			}
+			s.errs <- err
+			return
+		}
+
+		go s.startSession(conn)
+	}
 }
 
 func (s *server) addSession(newses *session) {
