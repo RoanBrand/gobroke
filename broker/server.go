@@ -22,11 +22,12 @@ type Server struct {
 	clients       map[string]*client
 	subscriptions topicTree
 
-	errs       chan error
-	register   chan *session
-	unregister chan *session
-	subs       chan subList
-	pubs       chan pub
+	errs        chan error
+	register    chan *session
+	unregister  chan *session
+	subscribe   chan subList
+	unsubscribe chan subList
+	pubs        chan pub
 
 	tcpL, tlsL net.Listener
 }
@@ -66,7 +67,8 @@ func NewServer(confPath string) (*Server, error) {
 		errs:          make(chan error),
 		register:      make(chan *session),
 		unregister:    make(chan *session),
-		subs:          make(chan subList),
+		subscribe:     make(chan subList),
+		unsubscribe:   make(chan subList),
 		pubs:          make(chan pub, serverBuffer),
 	}
 
@@ -111,8 +113,10 @@ func (s *Server) run() {
 			s.addSession(ses)
 		case ses := <-s.unregister:
 			s.removeClient(ses.client)
-		case sl := <-s.subs:
+		case sl := <-s.subscribe:
 			s.addSubscriptions(&sl)
+		case sl := <-s.unsubscribe:
+			s.removeSubscriptions(&sl)
 		case p := <-s.pubs:
 			s.matchSubscriptions(&p)
 		}
@@ -305,6 +309,7 @@ func (tl *topicLevel) init(size int) {
 
 type topicTree map[string]*topicLevel // level -> sub levels
 
+// Remove all subscriptions of client.
 func (tt topicTree) removeClient(c *client) {
 	var unSub func(topicTree, topT)
 	unSub = func(sLevel topicTree, cLevel topT) {
@@ -355,7 +360,26 @@ func (s *Server) addSubscriptions(subs *subList) {
 				sLev, cLev = sT.children, sC.children
 			} else {
 				sT.subscribers[subs.c] = subs.qoss[i]
+			}
+		}
+	}
+}
+
+func (s *Server) removeSubscriptions(subs *subList) {
+	for _, t := range subs.topics {
+		tLevels := strings.Split(t, "/")
+		l := s.subscriptions
+
+		for n, tl := range tLevels {
+			nl, present := l[tl]
+			if !present {
 				break
+			}
+
+			if n < len(tLevels)-1 {
+				l = nl.children
+			} else {
+				delete(nl.subscribers, subs.c)
 			}
 		}
 	}

@@ -51,6 +51,10 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				if p.flags != 0x02 { // [MQTT-3.8.1-1]
 					return protocolViolation("malformed SUBSCRIBE")
 				}
+			case UNSUBSCRIBE:
+				if p.flags != 0x02 { // [MQTT-3.10.1-1]
+					return protocolViolation("malformed UNSUBSCRIBE")
+				}
 			case DISCONNECT:
 				log.WithFields(log.Fields{
 					"client": ses.clientId,
@@ -80,6 +84,11 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				case SUBSCRIBE:
 					if p.remainingLength < 5 { // [MQTT-3.8.3-3]
 						return protocolViolation("invalid SUBSCRIBE")
+					}
+					p.vhLen = 2
+				case UNSUBSCRIBE:
+					if p.remainingLength < 5 { // [MQTT-3.10.3-2]
+						return protocolViolation("invalid UNSUBSCRIBE")
 					}
 					p.vhLen = 2
 				case PINGREQ:
@@ -188,7 +197,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				}
 
 				i += toRead
-			case SUBSCRIBE:
+			case SUBSCRIBE, UNSUBSCRIBE:
 				avail := l - i
 				toRead := p.vhLen
 				if avail < toRead {
@@ -235,6 +244,8 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					err = s.handlePublish(ses)
 				case SUBSCRIBE:
 					err = s.handleSubscribe(ses)
+				case UNSUBSCRIBE:
+					err = s.handleUnsubscribe(ses)
 				}
 				if err != nil {
 					return err
@@ -319,7 +330,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 		"topics": topics,
 	}).Debug("Got SUBSCRIBE packet")
 
-	s.subs <- subList{ses.client, topics, qoss}
+	s.subscribe <- subList{ses.client, topics, qoss}
 
 	// [MQTT-3.8.4-1, 4-4, 4-5, 4-6]
 	tl := len(topics)
@@ -330,6 +341,29 @@ func (s *Server) handleSubscribe(ses *session) error {
 	subackP = append(subackP, qoss...)                            // [MQTT-3.9.3-1]
 
 	return ses.writePacket(subackP)
+}
+
+func (s *Server) handleUnsubscribe(ses *session) error {
+	p := ses.packet.payload
+	topics := make([]string, 0, 2)
+	i := 0
+
+	for i < len(p) {
+		topicL := int(binary.BigEndian.Uint16(p[i:]))
+		topicEnd := i + 2 + topicL
+		topics = append(topics, string(p[i+2:topicEnd]))
+		i += 2 + topicEnd
+	}
+
+	log.WithFields(log.Fields{
+		"client": ses.clientId,
+		"topics": topics,
+	}).Debug("Got UNSUBSCRIBE packet")
+
+	s.unsubscribe <- subList{ses.client, topics, nil}
+
+	// [MQTT-3.10.4-4, 4-5, 4-6]
+	return ses.writePacket([]byte{UNSUBACK, 2, ses.packet.vh[0], ses.packet.vh[1]})
 }
 
 func variableLengthEncode(l int) []byte {
