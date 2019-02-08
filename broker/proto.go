@@ -319,9 +319,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 		"topics": topics,
 	}).Debug("Got SUBSCRIBE packet")
 
-	subs := &subList{cId: ses.clientId, topics: topics, qoss: qoss}
-	ses.client.subTX <- subs
-	s.subs <- subs
+	s.subs <- subList{ses.client, topics, qoss}
 
 	// [MQTT-3.8.4-1, 4-4, 4-5, 4-6]
 	tl := len(topics)
@@ -338,9 +336,9 @@ func variableLengthEncode(l int) []byte {
 	res := make([]byte, 0, 2)
 	for {
 		eb := l % 128
-		l = l / 128
+		l /= 128
 		if l > 0 {
-			eb = eb | 128
+			eb |= 128
 		}
 		res = append(res, byte(eb))
 		if l <= 0 {

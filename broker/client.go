@@ -9,16 +9,14 @@ import (
 )
 
 type client struct {
-	session *session
+	session       *session
+	subscriptions topT
 
 	tx      *bufio.Writer
 	txFlush chan struct{}
 	txLock  sync.Mutex
 
-	subTX         chan *subList    // from session
-	subscriptions map[string]uint8 // topic -> QoS level
-
-	pubRX     chan *pub // from server
+	pubRX     chan subPub // from server
 	publishId uint16
 
 	// QoS 0
@@ -38,11 +36,10 @@ type client struct {
 func newClient(ses *session) *client {
 	c := client{
 		session:       ses,
+		subscriptions: make(topT, 4),
 		tx:            bufio.NewWriter(ses.conn),
 		txFlush:       make(chan struct{}, 1),
-		subTX:         make(chan *subList),
-		subscriptions: make(map[string]uint8, 4),
-		pubRX:         make(chan *pub, 1),
+		pubRX:         make(chan subPub, 1),
 		q0Q:           list.New(),
 		q1Q:           list.New(),
 		qLookup:       make(map[uint16]*list.Element, 2),
@@ -60,8 +57,6 @@ func (c *client) run() {
 		select {
 		case p := <-c.pubRX:
 			c.processPub(p)
-		case sl := <-c.subTX:
-			c.addSubs(sl)
 		case <-c.clear:
 			c.clearState()
 			c.clear <- struct{}{}
@@ -70,9 +65,6 @@ func (c *client) run() {
 }
 
 func (c *client) clearState() {
-	for t := range c.subscriptions {
-		delete(c.subscriptions, t)
-	}
 	c.publishId = 0
 
 	c.q0Lock.Lock()
@@ -100,29 +92,24 @@ type qosPub struct {
 	sent bool
 }
 
-func (c *client) processPub(p *pub) {
-	maxQoS, ok := c.subscriptions[p.topic]
-	if !ok {
-		return
-	}
-
-	finalQoS := p.pubQoS
-	if maxQoS < p.pubQoS {
-		finalQoS = maxQoS
+func (c *client) processPub(sp subPub) {
+	finalQoS := sp.p.pubQoS
+	if sp.maxQoS < sp.p.pubQoS {
+		finalQoS = sp.maxQoS
 	}
 
 	switch finalQoS {
 	case 0:
 		c.q0Lock.Lock()
-		c.q0Q.PushBack(p.pacs[0])
+		c.q0Q.PushBack(sp.p.pacs[0])
 		c.q0Cond.Signal()
 		c.q0Lock.Unlock()
 	case 1:
-		pubP := make([]byte, len(p.pacs[1]))
-		copy(pubP, p.pacs[1])
+		pubP := make([]byte, len(sp.p.pacs[1]))
+		copy(pubP, sp.p.pacs[1])
 		c.publishId++
-		pubP[p.idLoc] = uint8(c.publishId >> 8)
-		pubP[p.idLoc+1] = uint8(c.publishId)
+		pubP[sp.p.idLoc] = uint8(c.publishId >> 8)
+		pubP[sp.p.idLoc+1] = uint8(c.publishId)
 
 		c.q1Lock.Lock()
 		c.qLookup[c.publishId] = c.q1Q.PushBack(&qosPub{done: make(chan struct{}), p: pubP})
@@ -147,8 +134,8 @@ func (c *client) qos1Done(pId uint16) {
 	}
 }
 
-func (c *client) addSubs(subs *subList) {
-	for i, t := range subs.topics {
-		c.subscriptions[t] = subs.qoss[i]
-	}
+type topL struct {
+	children topT
 }
+
+type topT map[string]*topL

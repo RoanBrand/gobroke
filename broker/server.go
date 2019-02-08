@@ -20,13 +20,13 @@ const (
 type Server struct {
 	config        *config.Config
 	clients       map[string]*client
-	subscriptions map[string]map[string]uint8 // topic -> subscribed client id -> QoS level
+	subscriptions topicTree
 
 	errs       chan error
 	register   chan *session
 	unregister chan *session
-	subs       chan *subList
-	pubs       chan *pub
+	subs       chan subList
+	pubs       chan pub
 
 	tcpL, tlsL net.Listener
 }
@@ -62,12 +62,12 @@ func NewServer(confPath string) (*Server, error) {
 	s := Server{
 		config:        conf,
 		clients:       make(map[string]*client, 16),
-		subscriptions: make(map[string]map[string]uint8, 4),
+		subscriptions: make(topicTree, 4),
 		errs:          make(chan error),
 		register:      make(chan *session),
-		unregister:    make(chan *session, 32),
-		subs:          make(chan *subList),
-		pubs:          make(chan *pub, serverBuffer),
+		unregister:    make(chan *session),
+		subs:          make(chan subList),
+		pubs:          make(chan pub, serverBuffer),
 	}
 
 	if err := s.setupTCP(); err != nil {
@@ -109,12 +109,12 @@ func (s *Server) run() {
 		select {
 		case ses := <-s.register:
 			s.addSession(ses)
-		case c := <-s.unregister:
-			s.removeClient(c.clientId)
+		case ses := <-s.unregister:
+			s.removeClient(ses.client)
 		case sl := <-s.subs:
-			s.addSubscriptions(sl)
+			s.addSubscriptions(&sl)
 		case p := <-s.pubs:
-			s.forwardToSubscribers(p)
+			s.matchSubscriptions(&p)
 		}
 	}
 }
@@ -205,11 +205,13 @@ func (s *Server) addSession(newses *session) {
 
 		newses.notFirstSession = true
 		c.session.stop()
+
 		if newses.persistent() && c.session.persistent() {
 			log.WithFields(log.Fields{
 				"client": newses.clientId,
 			}).Debug("New session inheriting previous client state")
 		} else {
+			s.subscriptions.removeClient(c)
 			c.clear <- struct{}{}
 			<-c.clear
 		}
@@ -224,29 +226,23 @@ func (s *Server) addSession(newses *session) {
 	newses.run()
 }
 
-func (s *Server) removeClient(id string) {
+func (s *Server) removeClient(c *client) {
+	if c == nil {
+		return
+	}
+
 	log.WithFields(log.Fields{
-		"client": id,
+		"client": c.session.clientId,
 	}).Debug("Deleting client session (CleanSession)")
-	delete(s.clients, id)
+
+	s.subscriptions.removeClient(c)
+	delete(s.clients, c.session.clientId)
 }
 
 type subList struct {
-	cId    string
+	c      *client
 	topics []string
 	qoss   []uint8
-}
-
-func (s *Server) addSubscriptions(subs *subList) {
-	for i, t := range subs.topics {
-		cl, ok := s.subscriptions[t]
-		if !ok {
-			s.subscriptions[t] = make(map[string]uint8, 8)
-			cl = s.subscriptions[t]
-		}
-
-		cl[subs.cId] = subs.qoss[i]
-	}
 }
 
 type pub struct {
@@ -294,13 +290,121 @@ func (s *Server) publishToSubscribers(p *packet, from string) {
 		pacs[1] = append(pacs[1], p.payload...)
 	}
 
-	s.pubs <- &pub{topic: topic, pacs: pacs, pubQoS: qos, idLoc: idLoc}
+	s.pubs <- pub{topic: topic, pacs: pacs, pubQoS: qos, idLoc: idLoc}
 }
 
-func (s *Server) forwardToSubscribers(p *pub) {
-	for cId := range s.subscriptions[p.topic] {
-		if c, ok := s.clients[cId]; ok {
-			c.pubRX <- p
+type topicLevel struct {
+	children    topicTree
+	subscribers map[*client]uint8 // client -> QoS level
+}
+
+func (tl *topicLevel) init(size int) {
+	tl.children = make(topicTree, size)
+	tl.subscribers = make(map[*client]uint8, size)
+}
+
+type topicTree map[string]*topicLevel // level -> sub levels
+
+func (tt topicTree) removeClient(c *client) {
+	var unSub func(topicTree, topT)
+	unSub = func(sLevel topicTree, cLevel topT) {
+		for l, nCl := range cLevel {
+			nSl, present := sLevel[l]
+			if present {
+				delete(nSl.subscribers, c)
+				unSub(nSl.children, nCl.children)
+			}
 		}
 	}
+
+	unSub(tt, c.subscriptions)
+}
+
+func (s *Server) addSubscriptions(subs *subList) {
+	size := func(n int) (s int) {
+		if n < 8 {
+			s = 4
+		} else if n < 16 {
+			s = 2
+		} else {
+			s = 1
+		}
+		return
+	}
+
+	for i, t := range subs.topics {
+		tLevels := strings.Split(t, "/")
+		sLev, cLev := s.subscriptions, subs.c.subscriptions
+
+		for n, tl := range tLevels {
+			sT, present := sLev[tl]
+			if !present {
+				sLev[tl] = &topicLevel{}
+				sT = sLev[tl]
+				sT.init(size(n))
+			}
+
+			sC, present := cLev[tl]
+			if !present {
+				cLev[tl] = &topL{}
+				sC = cLev[tl]
+				sC.children = make(topT, size(n))
+			}
+
+			if n < len(tLevels)-1 {
+				sLev, cLev = sT.children, sC.children
+			} else {
+				sT.subscribers[subs.c] = subs.qoss[i]
+				break
+			}
+		}
+	}
+}
+
+type subPub struct {
+	p      *pub
+	maxQoS uint8
+}
+
+func (s *Server) forwardToSubscribers(tl *topicLevel, p *pub) {
+	for c, maxQoS := range tl.subscribers {
+		c.pubRX <- subPub{p, maxQoS}
+	}
+}
+
+func (s *Server) matchSubscriptions(p *pub) {
+	tLevels := strings.Split(p.topic, "/")
+	var matchLevel func(topicTree, int)
+
+	matchLevel = func(l topicTree, n int) {
+		// direct match
+		if nl, ok := l[tLevels[n]]; ok {
+			if n == len(tLevels)-1 {
+				s.forwardToSubscribers(nl, p)
+				if nl, ok := nl.children["#"]; ok { // # match - next level
+					s.forwardToSubscribers(nl, p)
+				}
+			} else {
+				matchLevel(nl.children, n+1)
+			}
+		}
+
+		// # match
+		if nl, ok := l["#"]; ok {
+			s.forwardToSubscribers(nl, p)
+		}
+
+		// + match
+		if nl, ok := l["+"]; ok {
+			if n == len(tLevels)-1 {
+				s.forwardToSubscribers(nl, p)
+				if nl, ok := nl.children["#"]; ok { // # match - next level
+					s.forwardToSubscribers(nl, p)
+				}
+			} else {
+				matchLevel(nl.children, n+1)
+			}
+		}
+	}
+	matchLevel(s.subscriptions, 0)
 }
