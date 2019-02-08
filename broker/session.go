@@ -231,10 +231,12 @@ func (s *Server) startSession(conn net.Conn) {
 
 		if n > 0 {
 			if err := s.parseStream(&ns, rx[:n]); err != nil {
-				log.WithFields(log.Fields{
-					"client": ns.clientId,
-					"err":    err,
-				}).Error("RX stream packet parse error")
+				if err != errCleanExit {
+					log.WithFields(log.Fields{
+						"client": ns.clientId,
+						"err":    err,
+					}).Error("RX stream packet parse error")
+				}
 				return
 			}
 		}

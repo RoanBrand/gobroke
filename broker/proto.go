@@ -10,6 +10,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+var errCleanExit = errors.New("cleanExit")
+
 func protocolViolation(msg string) error {
 	return errors.New("client protocol violation: " + msg)
 }
@@ -59,6 +61,8 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				log.WithFields(log.Fields{
 					"client": ses.clientId,
 				}).Debug("Got DISCONNECT packet")
+
+				return errCleanExit
 			}
 
 			p.lenMul = 1
