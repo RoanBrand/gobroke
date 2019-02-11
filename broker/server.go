@@ -2,7 +2,6 @@ package broker
 
 import (
 	"crypto/tls"
-	"encoding/binary"
 	"errors"
 	"io/ioutil"
 	"net"
@@ -195,7 +194,6 @@ func (s *Server) startDispatcher(l net.Listener) {
 }
 
 func (s *Server) addSession(newses *session) {
-	newses.connectSent = true
 	log.WithFields(log.Fields{
 		"client": newses.clientId,
 	}).Info("New session")
@@ -254,47 +252,36 @@ type pub struct {
 	pacs   [][]byte
 	pubQoS uint8
 	idLoc  int
+	retain bool
 }
 
-func (s *Server) publishToSubscribers(p *packet, from string) {
-	topicLen := int(binary.BigEndian.Uint16(p.vh))
-	topic := string(p.vh[2 : topicLen+2])
-	qos := (p.flags & 0x06) >> 1
-
-	lf := log.Fields{
-		"client":  from,
-		"topic":   topic,
-		"QoS":     qos,
-		"payload": string(p.payload),
-	}
-	if p.flags&0x08 > 0 {
-		lf["duplicate"] = true
-	}
-	log.WithFields(lf).Debug("Got PUBLISH packet")
-
-	pacs := make([][]byte, 3)
-	pLen := len(p.payload)
+func makePub(topicUTF8, payload []byte, tLen int, qos uint8) (pacs [][]byte, idLoc int) {
+	pacs = make([][]byte, 3)
+	pLen := len(payload)
 
 	// QoS 0
-	pacs[0] = make([]byte, 1, 7+topicLen+pLen) // ctrl 1 + remainLen 4max + topicLen 2 + topicLen + msgLen
+	pacs[0] = make([]byte, 1, 7+tLen+pLen) // ctrl 1 + remainLen 4max + topicLen 2 + topicLen + msgLen
 	pacs[0][0] = PUBLISH
-	pacs[0] = append(pacs[0], variableLengthEncode(topicLen+pLen+2)...)
-	pacs[0] = append(pacs[0], p.vh[:topicLen+2]...) // 2 bytes + topic
-	pacs[0] = append(pacs[0], p.payload...)
+	pacs[0] = append(pacs[0], variableLengthEncode(2+tLen+pLen)...)
+	pacs[0] = append(pacs[0], topicUTF8...) // 2 bytes + topic
+	pacs[0] = append(pacs[0], payload...)
 
 	// QoS 1
-	var idLoc int
 	if qos > 0 {
-		pacs[1] = make([]byte, 1, 9+topicLen+pLen) // ctrl 1 + remainLen 4max + topicLen 2 + topicLen + pID 2 + msgLen
+		pacs[1] = make([]byte, 1, 9+tLen+pLen) // ctrl 1 + remainLen 4max + topicLen 2 + topicLen + pID 2 + msgLen
 		pacs[1][0] = PUBLISH | 0x02
-		pacs[1] = append(pacs[1], variableLengthEncode(topicLen+pLen+4)...)
-		pacs[1] = append(pacs[1], p.vh[:topicLen+2]...) // 2 bytes + topic
+		pacs[1] = append(pacs[1], variableLengthEncode(tLen+pLen+4)...)
+		pacs[1] = append(pacs[1], topicUTF8...)
 		idLoc = len(pacs[1])
 		pacs[1] = append(pacs[1], 0, 0) // pID
-		pacs[1] = append(pacs[1], p.payload...)
-	}
+		pacs[1] = append(pacs[1], payload...)
 
-	s.pubs <- pub{topic: topic, pacs: pacs, pubQoS: qos, idLoc: idLoc}
+		// QoS 2
+		if qos == 2 {
+			// TODO: parse qos2 first before this works
+		}
+	}
+	return
 }
 
 type topicLevel struct {

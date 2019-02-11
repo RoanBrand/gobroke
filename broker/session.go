@@ -24,6 +24,10 @@ type session struct {
 	notFirstSession bool
 	connectFlags    byte
 	keepAlive       time.Duration
+
+	will     pub
+	userName string
+	password []byte
 }
 
 func (s *session) run() {
@@ -60,10 +64,11 @@ func (s *session) stop() {
 
 func (s *session) qos0Pump() {
 	c := s.client
+	defer c.q0Lock.Unlock()
+
 	for {
 		c.q0Lock.Lock()
 		if s.dead {
-			c.q0Lock.Unlock()
 			return
 		}
 
@@ -71,13 +76,11 @@ func (s *session) qos0Pump() {
 			c.q0Cond.Wait()
 		}
 		if s.dead {
-			c.q0Lock.Unlock()
 			return
 		}
 
 		for p0 := c.q0Q.Front(); p0 != nil; p0 = p0.Next() {
 			if err := s.writePacket(p0.Value.([]byte)); err != nil {
-				c.q0Lock.Unlock()
 				return
 			}
 			c.q0Q.Remove(p0)
@@ -89,10 +92,11 @@ func (s *session) qos0Pump() {
 func (s *session) qos1Pump() {
 	c := s.client
 	started := false
+	defer c.q1Lock.Unlock()
+
 	for {
 		c.q1Lock.Lock()
 		if s.dead {
-			c.q1Lock.Unlock()
 			return
 		}
 
@@ -100,7 +104,6 @@ func (s *session) qos1Pump() {
 			c.q1Cond.Wait()
 		}
 		if s.dead {
-			c.q1Lock.Unlock()
 			return
 		}
 
@@ -116,7 +119,6 @@ func (s *session) qos1Pump() {
 				}
 			}
 			if err := s.writePacket(p.p); err != nil {
-				c.q1Lock.Unlock()
 				return
 			}
 			p.sent = true
@@ -190,7 +192,14 @@ func (s *Server) startSession(conn net.Conn) {
 	ns := session{conn: conn}
 	ns.packet.vh = make([]byte, 0, 512)
 	ns.packet.payload = make([]byte, 0, 512)
-	defer ns.stop()
+
+	graceFullExit := false
+	defer func() {
+		if !graceFullExit && ns.will.topic != "" && ns.connectSent {
+			s.pubs <- ns.will
+		}
+		ns.stop()
+	}()
 
 	rx := make([]byte, 1024)
 	for {
@@ -231,7 +240,9 @@ func (s *Server) startSession(conn net.Conn) {
 
 		if n > 0 {
 			if err := s.parseStream(&ns, rx[:n]); err != nil {
-				if err != errCleanExit {
+				if err == errCleanExit {
+					graceFullExit = true
+				} else {
 					log.WithFields(log.Fields{
 						"client": ns.clientId,
 						"err":    err,

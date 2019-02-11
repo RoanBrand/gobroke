@@ -270,34 +270,127 @@ var unNamedClients int
 
 func (s *Server) handleConnect(ses *session) error {
 	p := ses.packet.payload
-	if len(p) < 2 { // [MQTT-3.1.3-3]
-		return protocolViolation("malformed CONNECT payload")
+	pLen := len(p)
+
+	// Client ID
+	if pLen < 2 { // [MQTT-3.1.3-3]
+		return protocolViolation("malformed CONNECT payload no clientID")
+	}
+	clientIdLen := int(binary.BigEndian.Uint16(p))
+	offs := 2 + clientIdLen
+	if pLen < offs {
+		return protocolViolation("malformed CONNECT payload too short clientID")
 	}
 
-	clientIdLen := binary.BigEndian.Uint16(p)
 	if clientIdLen > 0 {
-		ses.clientId = string(p[2 : clientIdLen+2])
+		ses.clientId = string(p[2:offs])
 	} else {
 		if ses.persistent() { // [MQTT-3.1.3-7]
 			ses.sendConnack(2) // [MQTT-3.1.3-8]
-			return protocolViolation("must have client ID when persistent session")
+			return protocolViolation("must have clientID when persistent session")
 		}
 
 		ses.clientId = fmt.Sprintf("noname-%d-%d", unNamedClients, time.Now().UnixNano()/100000)
 		unNamedClients++
 	}
 
-	// TODO: Will Topic, Will Msg, User Name, Password
+	// Will Topic & Msg
+	if ses.connectFlags&0x04 > 0 {
+		if pLen < 2+offs {
+			return protocolViolation("malformed CONNECT payload no will Topic")
+		}
+		wTopicUTFStart := offs
+		wTopicLen := int(binary.BigEndian.Uint16(p[offs:]))
+		offs += 2
+		if pLen < offs+wTopicLen {
+			return protocolViolation("malformed CONNECT payload too short will Topic")
+		}
 
-	ses.conn.SetReadDeadline(time.Time{}) // CONNECT packet timeout
+		wTopicUTFEnd := offs + wTopicLen
+		ses.will.topic = string(p[offs:wTopicUTFEnd])
+		offs += wTopicLen
+
+		if pLen < 2+offs {
+			return protocolViolation("malformed CONNECT payload no will Message")
+		}
+		wMsgLen := int(binary.BigEndian.Uint16(p[offs:]))
+		offs += 2
+		if pLen < offs+wMsgLen {
+			return protocolViolation("malformed CONNECT payload too short will Message")
+		}
+
+		wQoS := (ses.connectFlags & 0x18) >> 3
+		if wQoS > 2 { // [MQTT-3.1.2-14]
+			return protocolViolation("malformed CONNECT invalid will QoS level")
+		}
+		ses.will.pacs, ses.will.idLoc = makePub(p[wTopicUTFStart:wTopicUTFEnd], p[offs:offs+wMsgLen], wTopicLen, wQoS)
+		ses.will.pubQoS = wQoS
+		ses.will.retain = ses.connectFlags&0x20 > 0
+		offs += wMsgLen
+
+	} else if ses.connectFlags&0x38 > 0 { // [MQTT-3.1.2-11, 2-13, 2-15]
+		return protocolViolation("malformed CONNECT will Flags")
+	}
+
+	// Username & Password
+	if ses.connectFlags&0x80 > 0 {
+		if pLen < 2+offs {
+			return protocolViolation("malformed CONNECT payload no username")
+		}
+		userLen := int(binary.BigEndian.Uint16(p[offs:]))
+		offs += 2
+		if pLen < offs+userLen {
+			return protocolViolation("malformed CONNECT payload too short username")
+		}
+
+		ses.userName = string(p[offs : offs+userLen])
+		offs += userLen
+
+		if ses.connectFlags&0x40 > 0 {
+			if pLen < 2+offs {
+				return protocolViolation("malformed CONNECT payload no password")
+			}
+			passLen := int(binary.BigEndian.Uint16(p[offs:]))
+			offs += 2
+			if pLen < offs+passLen {
+				return protocolViolation("malformed CONNECT payload too short password")
+			}
+
+			ses.password = make([]byte, passLen)
+			copy(ses.password, p[offs:offs+passLen])
+			// offs += wMsgLen
+		}
+
+	} else if ses.connectFlags&0x40 > 0 {
+		return protocolViolation("malformed CONNECT password without username")
+	}
+
+	ses.conn.SetReadDeadline(time.Time{}) // CONNECT packet timeout cancel
+	ses.connectSent = true
 	s.register <- ses
-
 	return nil
 }
 
 func (s *Server) handlePublish(ses *session) error {
 	p := &ses.packet
-	s.publishToSubscribers(p, ses.clientId)
+	topicLen := int(binary.BigEndian.Uint16(p.vh))
+	topic := string(p.vh[2 : topicLen+2])
+	qos := (p.flags & 0x06) >> 1
+
+	lf := log.Fields{
+		"client":  ses.clientId,
+		"topic":   topic,
+		"QoS":     qos,
+		"payload": string(p.payload),
+	}
+	if p.flags&0x08 > 0 {
+		lf["duplicate"] = true
+	}
+	log.WithFields(lf).Debug("Got PUBLISH packet")
+
+	pacs, idLoc := makePub(p.vh[:topicLen+2], p.payload, topicLen, qos)
+
+	s.pubs <- pub{topic, pacs, qos, idLoc, false}
 
 	switch p.flags & 0x06 {
 	case 0x02: // QoS 1
