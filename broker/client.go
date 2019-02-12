@@ -100,8 +100,16 @@ func (c *client) processPub(sp subPub) {
 
 	switch finalQoS {
 	case 0:
+		var pubP []byte
+		if sp.retained {
+			pubP = make([]byte, len(sp.p.pacs[0]))
+			pubP[0] |= 0x01
+		} else {
+			pubP = sp.p.pacs[0]
+		}
+
 		c.q0Lock.Lock()
-		c.q0Q.PushBack(sp.p.pacs[0])
+		c.q0Q.PushBack(pubP)
 		c.q0Cond.Signal()
 		c.q0Lock.Unlock()
 	case 1:
@@ -110,6 +118,9 @@ func (c *client) processPub(sp subPub) {
 		c.publishId++
 		pubP[sp.p.idLoc] = uint8(c.publishId >> 8)
 		pubP[sp.p.idLoc+1] = uint8(c.publishId)
+		if sp.retained {
+			pubP[0] |= 0x01
+		}
 
 		c.q1Lock.Lock()
 		c.qLookup[c.publishId] = c.q1Q.PushBack(&qosPub{done: make(chan struct{}), p: pubP})

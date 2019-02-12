@@ -29,7 +29,7 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 * Service can then be started with `gobroke -service start` or from the OS Service Manager
 ##### TLS
 * Example self-signed certificates included that can be used by MQTT clients on `localhost`
-* Make sure MQTT client does not use regular TCP port (default `1883`)
+* Make sure MQTT client does not use regular TCP port (default `8883`, not `1883`)
 
 ## Run
 * `go run run.go -c="config.json"`

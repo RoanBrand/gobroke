@@ -299,6 +299,7 @@ func (s *Server) handleConnect(ses *session) error {
 		if pLen < 2+offs {
 			return protocolViolation("malformed CONNECT payload no will Topic")
 		}
+
 		wTopicUTFStart := offs
 		wTopicLen := int(binary.BigEndian.Uint16(p[offs:]))
 		offs += 2
@@ -307,12 +308,11 @@ func (s *Server) handleConnect(ses *session) error {
 		}
 
 		wTopicUTFEnd := offs + wTopicLen
-		ses.will.topic = string(p[offs:wTopicUTFEnd])
 		offs += wTopicLen
-
 		if pLen < 2+offs {
 			return protocolViolation("malformed CONNECT payload no will Message")
 		}
+
 		wMsgLen := int(binary.BigEndian.Uint16(p[offs:]))
 		offs += 2
 		if pLen < offs+wMsgLen {
@@ -323,8 +323,8 @@ func (s *Server) handleConnect(ses *session) error {
 		if wQoS > 2 { // [MQTT-3.1.2-14]
 			return protocolViolation("malformed CONNECT invalid will QoS level")
 		}
-		ses.will.pacs, ses.will.idLoc = makePub(p[wTopicUTFStart:wTopicUTFEnd], p[offs:offs+wMsgLen], wTopicLen, wQoS)
-		ses.will.pubQoS = wQoS
+
+		ses.will = makePub(p[wTopicUTFStart:wTopicUTFEnd], p[offs:offs+wMsgLen], wQoS)
 		ses.will.retain = ses.connectFlags&0x20 > 0
 		offs += wMsgLen
 
@@ -383,14 +383,18 @@ func (s *Server) handlePublish(ses *session) error {
 		"QoS":     qos,
 		"payload": string(p.payload),
 	}
+
+	pub := makePub(p.vh[:topicLen+2], p.payload, qos)
+	pub.retain = p.flags&0x01 > 0
+	s.pubs <- pub
+
 	if p.flags&0x08 > 0 {
 		lf["duplicate"] = true
 	}
+	if pub.retain {
+		lf["retain"] = true
+	}
 	log.WithFields(lf).Debug("Got PUBLISH packet")
-
-	pacs, idLoc := makePub(p.vh[:topicLen+2], p.payload, topicLen, qos)
-
-	s.pubs <- pub{topic, pacs, qos, idLoc, false}
 
 	switch p.flags & 0x06 {
 	case 0x02: // QoS 1

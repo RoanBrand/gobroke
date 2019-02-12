@@ -20,6 +20,7 @@ type Server struct {
 	config        *config.Config
 	clients       map[string]*client
 	subscriptions topicTree
+	retained      retainTree
 
 	errs        chan error
 	register    chan *session
@@ -63,6 +64,7 @@ func NewServer(confPath string) (*Server, error) {
 		config:        conf,
 		clients:       make(map[string]*client, 16),
 		subscriptions: make(topicTree, 4),
+		retained:      make(retainTree, 4),
 		errs:          make(chan error),
 		register:      make(chan *session),
 		unregister:    make(chan *session),
@@ -249,32 +251,39 @@ type subList struct {
 
 type pub struct {
 	topic  string
-	pacs   [][]byte
+	pacs   [][]byte // packets of all QoS levels
 	pubQoS uint8
-	idLoc  int
+	idLoc  int // index of publishID in packet when QoS > 0
 	retain bool
+	empty  bool // zero-byte payload
 }
 
-func makePub(topicUTF8, payload []byte, tLen int, qos uint8) (pacs [][]byte, idLoc int) {
-	pacs = make([][]byte, 3)
+func makePub(topicUTF8, payload []byte, qos uint8) (p pub) {
+	p.topic = string(topicUTF8[2:])
+	p.pacs = make([][]byte, 3)
+	p.pubQoS = qos
+	tLen := len(topicUTF8)
 	pLen := len(payload)
+	if pLen == 0 {
+		p.empty = true
+	}
 
 	// QoS 0
-	pacs[0] = make([]byte, 1, 7+tLen+pLen) // ctrl 1 + remainLen 4max + topicLen 2 + topicLen + msgLen
-	pacs[0][0] = PUBLISH
-	pacs[0] = append(pacs[0], variableLengthEncode(2+tLen+pLen)...)
-	pacs[0] = append(pacs[0], topicUTF8...) // 2 bytes + topic
-	pacs[0] = append(pacs[0], payload...)
+	p.pacs[0] = make([]byte, 1, 5+tLen+pLen) // ctrl 1 + remainLen 4max + topic(with2bytelen) + msgLen
+	p.pacs[0][0] = PUBLISH
+	p.pacs[0] = append(p.pacs[0], variableLengthEncode(tLen+pLen)...)
+	p.pacs[0] = append(p.pacs[0], topicUTF8...) // 2 bytes + topic
+	p.pacs[0] = append(p.pacs[0], payload...)
 
 	// QoS 1
 	if qos > 0 {
-		pacs[1] = make([]byte, 1, 9+tLen+pLen) // ctrl 1 + remainLen 4max + topicLen 2 + topicLen + pID 2 + msgLen
-		pacs[1][0] = PUBLISH | 0x02
-		pacs[1] = append(pacs[1], variableLengthEncode(tLen+pLen+4)...)
-		pacs[1] = append(pacs[1], topicUTF8...)
-		idLoc = len(pacs[1])
-		pacs[1] = append(pacs[1], 0, 0) // pID
-		pacs[1] = append(pacs[1], payload...)
+		p.pacs[1] = make([]byte, 1, 7+tLen+pLen) // ctrl 1 + remainLen 4max + topic(with2bytelen) + pID 2 + msgLen
+		p.pacs[1][0] = PUBLISH | 0x02
+		p.pacs[1] = append(p.pacs[1], variableLengthEncode(2+tLen+pLen)...)
+		p.pacs[1] = append(p.pacs[1], topicUTF8...)
+		p.idLoc = len(p.pacs[1])
+		p.pacs[1] = append(p.pacs[1], 0, 0) // pID
+		p.pacs[1] = append(p.pacs[1], payload...)
 
 		// QoS 2
 		if qos == 2 {
@@ -312,6 +321,7 @@ func (tt topicTree) removeClient(c *client) {
 	unSub(tt, c.subscriptions)
 }
 
+// Add subscriptions for client. Also check for matching retained messages.
 func (s *Server) addSubscriptions(subs *subList) {
 	size := func(n int) (s int) {
 		if n < 8 {
@@ -329,6 +339,7 @@ func (s *Server) addSubscriptions(subs *subList) {
 		sLev, cLev := s.subscriptions, subs.c.subscriptions
 
 		for n, tl := range tLevels {
+			// Server subscriptions
 			sT, present := sLev[tl]
 			if !present {
 				sLev[tl] = &topicLevel{}
@@ -336,6 +347,7 @@ func (s *Server) addSubscriptions(subs *subList) {
 				sT.init(size(n))
 			}
 
+			// Client's subscriptions
 			sC, present := cLev[tl]
 			if !present {
 				cLev[tl] = &topL{}
@@ -349,6 +361,66 @@ func (s *Server) addSubscriptions(subs *subList) {
 				sT.subscribers[subs.c] = subs.qoss[i]
 			}
 		}
+
+		// Retained messages
+		forwardLevel := func(l *retainLevel) {
+			if l.p != nil {
+				subs.c.pubRX <- subPub{l.p, subs.qoss[i], true}
+			}
+		}
+
+		var forwardAll func(retainTree)
+		forwardAll = func(l retainTree) {
+			for _, nl := range l {
+				forwardLevel(nl)
+				forwardAll(nl.children)
+			}
+		}
+
+		var matchLevel func(retainTree, int)
+		matchLevel = func(l retainTree, n int) {
+			switch tLevels[n] {
+			case "#":
+				forwardAll(l)
+			case "+":
+				switch len(tLevels) - n {
+				case 1:
+					for _, nl := range l {
+						forwardLevel(nl)
+					}
+				case 2:
+					if tLevels[len(tLevels)-1] == "#" {
+						for _, nl := range l {
+							forwardLevel(nl)
+						}
+					}
+					fallthrough
+				default:
+					for _, nl := range l {
+						matchLevel(nl.children, n+1)
+					}
+				}
+			default: // direct match
+				nl, ok := l[tLevels[n]]
+				if !ok {
+					break
+				}
+
+				switch len(tLevels) - n {
+				case 1:
+					forwardLevel(nl)
+				case 2:
+					if tLevels[len(tLevels)-1] == "#" {
+						forwardLevel(nl)
+					}
+					fallthrough
+				default:
+					matchLevel(nl.children, n+1)
+				}
+			}
+		}
+
+		matchLevel(s.retained, 0)
 	}
 }
 
@@ -373,16 +445,19 @@ func (s *Server) removeSubscriptions(subs *subList) {
 }
 
 type subPub struct {
-	p      *pub
-	maxQoS uint8
+	p        *pub
+	maxQoS   uint8
+	retained bool
 }
 
 func (s *Server) forwardToSubscribers(tl *topicLevel, p *pub) {
 	for c, maxQoS := range tl.subscribers {
-		c.pubRX <- subPub{p, maxQoS}
+		c.pubRX <- subPub{p, maxQoS, false}
 	}
 }
 
+// Match published message topic to all subscribers, and forward.
+// Also store pub if retained message.
 func (s *Server) matchSubscriptions(p *pub) {
 	tLevels := strings.Split(p.topic, "/")
 	var matchLevel func(topicTree, int)
@@ -390,13 +465,13 @@ func (s *Server) matchSubscriptions(p *pub) {
 	matchLevel = func(l topicTree, n int) {
 		// direct match
 		if nl, ok := l[tLevels[n]]; ok {
-			if n == len(tLevels)-1 {
+			if n < len(tLevels)-1 {
+				matchLevel(nl.children, n+1)
+			} else {
 				s.forwardToSubscribers(nl, p)
 				if nl, ok := nl.children["#"]; ok { // # match - next level
 					s.forwardToSubscribers(nl, p)
 				}
-			} else {
-				matchLevel(nl.children, n+1)
 			}
 		}
 
@@ -407,15 +482,45 @@ func (s *Server) matchSubscriptions(p *pub) {
 
 		// + match
 		if nl, ok := l["+"]; ok {
-			if n == len(tLevels)-1 {
+			if n < len(tLevels)-1 {
+				matchLevel(nl.children, n+1)
+			} else {
 				s.forwardToSubscribers(nl, p)
 				if nl, ok := nl.children["#"]; ok { // # match - next level
 					s.forwardToSubscribers(nl, p)
 				}
-			} else {
-				matchLevel(nl.children, n+1)
 			}
 		}
 	}
+
 	matchLevel(s.subscriptions, 0)
+	if !p.retain {
+		return
+	}
+
+	tr := s.retained
+	for n, tl := range tLevels {
+		nl, ok := tr[tl]
+		if !ok {
+			tr[tl] = &retainLevel{children: make(retainTree, 1)}
+			nl = tr[tl]
+		}
+
+		if n < len(tLevels)-1 {
+			tr = nl.children
+		} else {
+			if p.empty {
+				nl.p = nil
+			} else {
+				nl.p = p
+			}
+		}
+	}
 }
+
+type retainLevel struct {
+	p        *pub
+	children retainTree
+}
+
+type retainTree map[string]*retainLevel
