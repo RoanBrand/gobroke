@@ -21,11 +21,13 @@ const (
 var connectPacket = []byte{0, 4, 'M', 'Q', 'T', 'T', 4}
 var pingRespPacket = []byte{PINGRESP, 0}
 
+// MQTT packet parser states
 const (
 	// Fixed header
 	controlAndFlags = iota
 	length
 
+	variableHeaderLen
 	variableHeader
 	payload
 )
@@ -37,10 +39,9 @@ type packet struct {
 	lenMul          uint32
 
 	// Variable header
-	vhLen    uint32
-	gotVhLen bool // publish packet
-	vh       []byte
-	pID      uint16 // subscribe, unsubscribe, publish with QoS>0.
+	vhLen uint32
+	vh    []byte
+	pID   uint16 // subscribe, unsubscribe, publish with QoS>0.
 
 	payload []byte
 }

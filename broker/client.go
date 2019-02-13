@@ -131,8 +131,7 @@ func (c *client) processPub(sp subPub) {
 
 func (c *client) qos1Done(pId uint16) {
 	c.q1Lock.Lock()
-	qPub, ok := c.qLookup[pId]
-	if ok {
+	if qPub, ok := c.qLookup[pId]; ok {
 		close(c.q1Q.Remove(qPub).(*qosPub).done)
 		delete(c.qLookup, pId)
 		c.q1Lock.Unlock()

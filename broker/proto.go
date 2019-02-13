@@ -82,7 +82,6 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					p.vhLen = 10
 				case PUBLISH:
 					p.vhLen = 0 // will increase later
-					p.gotVhLen = false
 				case PUBACK:
 					p.vhLen = 2
 				case SUBSCRIBE:
@@ -106,25 +105,43 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					ses.rxState = controlAndFlags
 				} else {
 					p.vh = p.vh[:0]
-					ses.rxState = variableHeader
+					if p.controlType == PUBLISH {
+						ses.rxState = variableHeaderLen
+					} else {
+						ses.rxState = variableHeader
+					}
 				}
 			}
 
 			i++
-		case variableHeader:
-			switch p.controlType {
-			case CONNECT:
-				avail := l - i
-				toRead := p.vhLen
-				if avail < toRead {
-					toRead = avail
+		case variableHeaderLen:
+			p.vh = append(p.vh, rx[i])
+			p.vhLen++
+			p.remainingLength--
+
+			if p.vhLen == 2 {
+				p.vhLen = uint32(binary.BigEndian.Uint16(p.vh)) // vhLen is now remaining
+				if p.flags&0x06 > 0 {                           // Qos > 0
+					p.vhLen += 2
 				}
+				ses.rxState = variableHeader
+			}
 
-				p.vh = append(p.vh, rx[i:i+toRead]...)
-				p.remainingLength -= toRead
-				p.vhLen -= toRead
+			i++
+		case variableHeader:
+			avail := l - i
+			toRead := p.vhLen
+			if avail < toRead {
+				toRead = avail
+			}
 
-				if p.vhLen == 0 {
+			p.vh = append(p.vh, rx[i:i+toRead]...)
+			p.remainingLength -= toRead
+			p.vhLen -= toRead
+
+			if p.vhLen == 0 {
+				switch p.controlType {
+				case CONNECT: // TODO: handle other variable headers
 					if !bytes.Equal(connectPacket, p.vh[:7]) { // [MQTT-3.1.2-1]
 						ses.sendConnack(1) // [MQTT-3.1.2-2]
 						return protocolViolation("unsupported client protocol. Must be MQTT v3.1.1")
@@ -137,98 +154,29 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 					// [MQTT-3.1.2-24]
 					ses.keepAlive = time.Duration(binary.BigEndian.Uint16(p.vh[8:])) * time.Second * 3 / 2
-					p.payload = p.payload[:0]
-					ses.rxState = payload
-				}
-
-				i += toRead
-			case PUBLISH:
-				if !p.gotVhLen {
-					p.vh = append(p.vh, rx[i])
-					p.vhLen++
-					p.remainingLength--
-
-					if p.vhLen == 2 {
-						// vhLen is now remaining
-						p.vhLen = uint32(binary.BigEndian.Uint16(p.vh))
-						if p.flags&0x06 > 0 { // Qos > 0
-							p.vhLen += 2
-						}
-						p.gotVhLen = true
+				case PUBLISH:
+					if p.flags&0x06 > 0 { // Qos > 0
+						p.pID = binary.BigEndian.Uint16(p.vh[len(p.vh)-2:])
 					}
-
-					i++
-				} else {
-					avail := l - i
-					toRead := p.vhLen
-					if avail < toRead {
-						toRead = avail
-					}
-
-					p.vh = append(p.vh, rx[i:i+toRead]...)
-					p.remainingLength -= toRead
-					p.vhLen -= toRead
-
-					if p.vhLen == 0 {
-						if p.flags&0x06 > 0 { // Qos > 0
-							p.pID = binary.BigEndian.Uint16(p.vh[len(p.vh)-2:])
-						}
-						p.payload = p.payload[:0]
-						ses.rxState = payload
-					}
-
-					i += toRead
-				}
-
-				if p.remainingLength == 0 {
-					if err := s.handlePublish(ses); err != nil {
-						return err
-					}
-				}
-			case PUBACK:
-				avail := l - i
-				toRead := p.vhLen
-				if avail < toRead {
-					toRead = avail
-				}
-
-				p.vh = append(p.vh, rx[i:i+toRead]...)
-				p.remainingLength -= toRead
-				p.vhLen -= toRead
-
-				if p.vhLen == 0 {
+				case PUBACK:
 					ses.client.qos1Done(binary.BigEndian.Uint16(p.vh))
 				}
 
-				i += toRead
-			case SUBSCRIBE, UNSUBSCRIBE:
-				avail := l - i
-				toRead := p.vhLen
-				if avail < toRead {
-					toRead = avail
-				}
-
-				p.vh = append(p.vh, rx[i:i+toRead]...)
-				p.remainingLength -= toRead
-				p.vhLen -= toRead
-
-				if p.vhLen == 0 {
-					p.payload = p.payload[:0]
+				p.payload = p.payload[:0]
+				if p.remainingLength == 0 {
+					ses.updateTimeout()
+					ses.rxState = controlAndFlags
+					if p.controlType == PUBLISH {
+						if err := s.handlePublish(ses); err != nil {
+							return err
+						}
+					}
+				} else {
 					ses.rxState = payload
 				}
-
-				i += toRead
-			default:
-				// TODO: handle other variable headers
-				p.remainingLength--
-				i++
 			}
 
-			if p.remainingLength == 0 {
-				ses.updateTimeout()
-				ses.rxState = controlAndFlags
-			}
-
+			i += toRead
 		case payload:
 			avail := l - i
 			toRead := p.remainingLength
