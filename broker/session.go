@@ -54,9 +54,9 @@ func (s *session) stop() {
 		if c != nil {
 			c.txFlush <- struct{}{}
 			c.txLock.Unlock()
-			c.q1Cond.Signal()
+			c.q1Trig.Signal()
 			c.q1Lock.Unlock()
-			c.q0Cond.Signal()
+			c.q0Trig.Signal()
 			c.q0Lock.Unlock()
 		}
 	})
@@ -73,7 +73,7 @@ func (s *session) qos0Pump() {
 		}
 
 		if c.q0Q.Front() == nil {
-			c.q0Cond.Wait()
+			c.q0Trig.Wait()
 		}
 		if s.dead {
 			return
@@ -101,7 +101,7 @@ func (s *session) qos1Pump() {
 		}
 
 		if c.q1Q.Front() == nil {
-			c.q1Cond.Wait()
+			c.q1Trig.Wait()
 		}
 		if s.dead {
 			return
@@ -255,31 +255,28 @@ func (s *Server) startSession(conn net.Conn) {
 }
 
 func (s *session) startWriter() {
-	for {
-		select {
-		case <-s.client.txFlush:
-			s.client.txLock.Lock()
-			if s.dead {
-				s.client.txLock.Unlock()
-				return
-			}
+	for range s.client.txFlush {
+		s.client.txLock.Lock()
+		if s.dead {
+			s.client.txLock.Unlock()
+			return
+		}
 
-			if s.client.tx.Buffered() > 0 {
-				if err := s.client.tx.Flush(); err != nil {
-					if strings.Contains(err.Error(), "use of closed") {
-						s.client.txLock.Unlock()
-						return
-					}
-
-					log.WithFields(log.Fields{
-						"client": s.clientId,
-						"err":    err,
-					}).Error("TCP TX error")
+		if s.client.tx.Buffered() > 0 {
+			if err := s.client.tx.Flush(); err != nil {
+				if strings.Contains(err.Error(), "use of closed") {
 					s.client.txLock.Unlock()
 					return
 				}
+
+				log.WithFields(log.Fields{
+					"client": s.clientId,
+					"err":    err,
+				}).Error("TCP TX error")
+				s.client.txLock.Unlock()
+				return
 			}
-			s.client.txLock.Unlock()
 		}
+		s.client.txLock.Unlock()
 	}
 }

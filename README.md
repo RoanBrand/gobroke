@@ -40,7 +40,7 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 * Config path can be overridden with `gobroke -c="path_to_config_file"`
 
 ## TODO
-* QoS 2
+* QoS 2 Subscriptions (Clients are able to send QoS 2 messages currently though)
 * Websocket
 * Persistence to survive restart
 * $SYS Topic

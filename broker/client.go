@@ -21,14 +21,17 @@ type client struct {
 
 	// QoS 0
 	q0Q    *list.List
-	q0Cond *sync.Cond
+	q0Trig *sync.Cond
 	q0Lock sync.Mutex
 
 	// QoS 1
-	q1Q     *list.List
-	qLookup map[uint16]*list.Element
-	q1Cond  *sync.Cond
-	q1Lock  sync.Mutex
+	q1Q      *list.List
+	q1Lookup map[uint16]*list.Element
+	q1Trig   *sync.Cond
+	q1Lock   sync.Mutex
+
+	// QoS 2
+	q2RxLookup map[uint16]struct{}
 
 	clear chan struct{}
 }
@@ -42,11 +45,12 @@ func newClient(ses *session) *client {
 		pubRX:         make(chan subPub, 1),
 		q0Q:           list.New(),
 		q1Q:           list.New(),
-		qLookup:       make(map[uint16]*list.Element, 2),
+		q1Lookup:      make(map[uint16]*list.Element, 2),
+		q2RxLookup:    make(map[uint16]struct{}, 2),
 		clear:         make(chan struct{}),
 	}
-	c.q0Cond = sync.NewCond(&c.q0Lock)
-	c.q1Cond = sync.NewCond(&c.q1Lock)
+	c.q0Trig = sync.NewCond(&c.q0Lock)
+	c.q1Trig = sync.NewCond(&c.q1Lock)
 
 	go c.run()
 	return &c
@@ -73,10 +77,14 @@ func (c *client) clearState() {
 
 	c.q1Lock.Lock()
 	c.q1Q.Init()
-	for i := range c.qLookup {
-		delete(c.qLookup, i)
+	for i := range c.q1Lookup {
+		delete(c.q1Lookup, i)
 	}
 	c.q1Lock.Unlock()
+
+	for i := range c.q2RxLookup {
+		delete(c.q2RxLookup, i)
+	}
 }
 
 func (c *client) replaceSession(s *session) {
@@ -110,7 +118,7 @@ func (c *client) processPub(sp subPub) {
 
 		c.q0Lock.Lock()
 		c.q0Q.PushBack(pubP)
-		c.q0Cond.Signal()
+		c.q0Trig.Signal()
 		c.q0Lock.Unlock()
 	case 1:
 		pubP := make([]byte, len(sp.p.pacs[1]))
@@ -123,23 +131,23 @@ func (c *client) processPub(sp subPub) {
 		}
 
 		c.q1Lock.Lock()
-		c.qLookup[c.publishId] = c.q1Q.PushBack(&qosPub{done: make(chan struct{}), p: pubP})
-		c.q1Cond.Signal()
+		c.q1Lookup[c.publishId] = c.q1Q.PushBack(&qosPub{done: make(chan struct{}), p: pubP})
+		c.q1Trig.Signal()
 		c.q1Lock.Unlock()
 	}
 }
 
-func (c *client) qos1Done(pId uint16) {
+func (c *client) qos1Done(pID uint16) {
 	c.q1Lock.Lock()
-	if qPub, ok := c.qLookup[pId]; ok {
+	if qPub, ok := c.q1Lookup[pID]; ok {
 		close(c.q1Q.Remove(qPub).(*qosPub).done)
-		delete(c.qLookup, pId)
+		delete(c.q1Lookup, pID)
 		c.q1Lock.Unlock()
 	} else {
 		c.q1Lock.Unlock()
 		log.WithFields(log.Fields{
 			"client":   c.session.clientId,
-			"packetID": pId,
+			"packetID": pID,
 		}).Error("Got PUBACK packet for none existing packet")
 	}
 }

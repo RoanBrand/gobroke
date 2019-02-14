@@ -49,6 +49,10 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				if p.flags&0x06 == 6 { // [MQTT-3.3.1-4]
 					return protocolViolation("malformed PUBLISH")
 				}
+			case PUBREL:
+				if p.flags != 0x02 {
+					return protocolViolation("malformed PUBREL")
+				}
 			case SUBSCRIBE:
 				if p.flags != 0x02 { // [MQTT-3.8.1-1]
 					return protocolViolation("malformed SUBSCRIBE")
@@ -81,8 +85,8 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				case CONNECT:
 					p.vhLen = 10
 				case PUBLISH:
-					p.vhLen = 0 // will increase later
-				case PUBACK:
+					p.vhLen = 0 // determined later
+				case PUBACK, PUBREL:
 					p.vhLen = 2
 				case SUBSCRIBE:
 					if p.remainingLength < 5 { // [MQTT-3.8.3-3]
@@ -160,17 +164,22 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					}
 				case PUBACK:
 					ses.client.qos1Done(binary.BigEndian.Uint16(p.vh))
+				case PUBREL: // [MQTT-4.3.3-2]
+					delete(ses.client.q2RxLookup, binary.BigEndian.Uint16(p.vh))
+					if err := ses.writePacket([]byte{PUBCOMP, 2, p.vh[0], p.vh[1]}); err != nil {
+						return err
+					}
 				}
 
 				p.payload = p.payload[:0]
 				if p.remainingLength == 0 {
 					ses.updateTimeout()
-					ses.rxState = controlAndFlags
 					if p.controlType == PUBLISH {
 						if err := s.handlePublish(ses); err != nil {
 							return err
 						}
 					}
+					ses.rxState = controlAndFlags
 				} else {
 					ses.rxState = payload
 				}
@@ -334,7 +343,6 @@ func (s *Server) handlePublish(ses *session) error {
 
 	pub := makePub(p.vh[:topicLen+2], p.payload, qos)
 	pub.retain = p.flags&0x01 > 0
-	s.pubs <- pub
 
 	if p.flags&0x08 > 0 {
 		lf["duplicate"] = true
@@ -345,9 +353,17 @@ func (s *Server) handlePublish(ses *session) error {
 	log.WithFields(lf).Debug("Got PUBLISH packet")
 
 	switch p.flags & 0x06 {
+	case 0x00: // QoS 0
+		s.pubs <- pub
 	case 0x02: // QoS 1
+		s.pubs <- pub
 		return ses.writePacket([]byte{PUBACK, 2, byte(p.pID >> 8), byte(p.pID)})
-	case 0x04: // QoS 2
+	case 0x04: // QoS 2 - [MQTT-4.3.3-2]
+		if _, present := ses.client.q2RxLookup[p.pID]; !present {
+			ses.client.q2RxLookup[p.pID] = struct{}{}
+			s.pubs <- pub
+		}
+		return ses.writePacket([]byte{PUBREC, 2, byte(p.pID >> 8), byte(p.pID)})
 	}
 
 	return nil
