@@ -17,13 +17,26 @@ var upgrader = websocket.Upgrader{
 
 var dispatch func(net.Conn)
 
-func Setup(address string, checkOrigin bool, dispatcher func(net.Conn), errs chan error) error {
-	dispatch = dispatcher
+func SetDispatcher(d func(net.Conn)) {
+	dispatch = d
+}
+
+func Setup(address string, checkOrigin bool, errs chan error) error {
 	if !checkOrigin {
 		upgrader.CheckOrigin = func(*http.Request) bool { return true }
 	}
 	go func() {
 		errs <- http.ListenAndServe(address, http.HandlerFunc(handler))
+	}()
+	return nil
+}
+
+func SetupTLS(address, certFile, keyFile string, checkOrigin bool, errs chan error) error {
+	if !checkOrigin {
+		upgrader.CheckOrigin = func(*http.Request) bool { return true }
+	}
+	go func() {
+		errs <- http.ListenAndServeTLS(address, certFile, keyFile, http.HandlerFunc(handler))
 	}()
 	return nil
 }

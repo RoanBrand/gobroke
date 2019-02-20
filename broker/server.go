@@ -80,7 +80,12 @@ func NewServer(confPath string) (*Server, error) {
 	if err := s.setupTLS(); err != nil {
 		return nil, err
 	}
+
+	websocket.SetDispatcher(s.startSession)
 	if err := s.setupWebsocket(); err != nil {
+		return nil, err
+	}
+	if err := s.setupWebsocketSecure(); err != nil {
 		return nil, err
 	}
 
@@ -112,6 +117,9 @@ func (s *Server) run() {
 	}
 	if s.config.WS.Enabled {
 		lf["ws_address"] = s.config.WS.Address
+	}
+	if s.config.WSS.Enabled {
+		lf["wss_address"] = s.config.WSS.Address
 	}
 	log.WithFields(lf).Info("Starting MQTT server")
 
@@ -192,7 +200,16 @@ func (s *Server) setupWebsocket() error {
 		return nil
 	}
 
-	return websocket.Setup(s.config.WS.Address, s.config.WS.CheckOrigin, s.startSession, s.errs)
+	return websocket.Setup(s.config.WS.Address, s.config.WS.CheckOrigin, s.errs)
+}
+
+func (s *Server) setupWebsocketSecure() error {
+	c := &s.config.WSS
+	if !c.Enabled {
+		return nil
+	}
+
+	return websocket.SetupTLS(c.Address, c.Cert, c.Key, c.CheckOrigin, s.errs)
 }
 
 func (s *Server) startDispatcher(l net.Listener) {

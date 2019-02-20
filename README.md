@@ -21,14 +21,21 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 		"enabled": true,
 		"address": ":80",
 		"check_origin": false              // check request origin
-	},	
+	},
+	"wss": {                                   // Secure Websocket over HTTPS
+		"enabled": true,
+		"address": ":443",
+		"check_origin": false,
+		"cert": "path_to_TLS_certificate",
+		"key": "path_to_private_key"
+	},
 	"log": {
 		"file": "path_to_log_file",        // log to file if specified
 		"level": "info"                    // error, warn, info, debug
 	}
 }
 ```
-* Most of config is optional, but one of `tcp`, `tls`, or `ws` must be specified and enabled
+* Most of config is optional, but one of `tcp`, `tls`, `ws` or `wss` must be specified and enabled
 ##### OS Service
 * Build then copy the binary and config file to a folder you want and run `gobroke -service install`
 * Service can then be started with `gobroke -service start` or from the OS Service Manager
@@ -38,6 +45,7 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 * Make sure MQTT client does not use regular TCP port (default `8883`, not `1883`)
 ##### Websocket
 * The address must contain host/ip only and no URL. Currently it is served over all URLs
+* `check_origin` ensures that Origin request header is present and that the origin host is equal to request Host header before accepting a connection
 
 ## Run
 * `go run run.go -c="config.json"`

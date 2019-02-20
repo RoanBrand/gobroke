@@ -12,14 +12,19 @@ type Config struct {
 
 	TLS struct {
 		network
-		Cert string `json:"cert"`
-		Key  string `json:"key"`
+		keyPair
 	} `json:"tls"`
 
 	WS struct {
 		network
 		CheckOrigin bool `json:"check_origin"`
 	} `json:"ws"`
+
+	WSS struct {
+		network
+		keyPair
+		CheckOrigin bool `json:"check_origin"`
+	} `json:"wss"`
 
 	Log struct {
 		File  string `json:"file"`
@@ -30,6 +35,11 @@ type Config struct {
 type network struct {
 	Enabled bool   `json:"enabled"`
 	Address string `json:"address"`
+}
+
+type keyPair struct {
+	Cert string `json:"cert"`
+	Key  string `json:"key"`
 }
 
 func New(fPath string) (*Config, error) {
@@ -51,8 +61,8 @@ func New(fPath string) (*Config, error) {
 }
 
 func (c *Config) validate() error {
-	if !c.TCP.Enabled && !c.TLS.Enabled && !c.WS.Enabled {
-		return errors.New("at least one connection (TCP, TLS or Websocket) needs to be setup")
+	if !c.TCP.Enabled && !c.TLS.Enabled && !c.WS.Enabled && !c.WSS.Enabled {
+		return errors.New("at least one connection (TCP, TLS, Websocket or Websocket secure) needs to be setup")
 	}
 
 	if c.TCP.Enabled {
@@ -74,6 +84,16 @@ func (c *Config) validate() error {
 	if c.WS.Enabled {
 		if !strings.Contains(c.WS.Address, ":") {
 			c.WS.Address += ":80"
+		}
+	}
+
+	if c.WSS.Enabled {
+		if c.WSS.Cert == "" || c.WSS.Key == "" {
+			return errors.New("invalid TLS certificate and/or private key file path setup for Websocket Secure")
+		}
+
+		if !strings.Contains(c.WSS.Address, ":") {
+			c.WSS.Address += ":443"
 		}
 	}
 
