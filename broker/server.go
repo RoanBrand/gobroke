@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/RoanBrand/gobroke/config"
+	"github.com/RoanBrand/gobroke/websocket"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -79,6 +80,9 @@ func NewServer(confPath string) (*Server, error) {
 	if err := s.setupTLS(); err != nil {
 		return nil, err
 	}
+	if err := s.setupWebsocket(); err != nil {
+		return nil, err
+	}
 
 	return &s, nil
 }
@@ -105,6 +109,9 @@ func (s *Server) run() {
 	}
 	if s.config.TLS.Enabled {
 		lf["tls_address"] = s.config.TLS.Address
+	}
+	if s.config.WS.Enabled {
+		lf["ws_address"] = s.config.WS.Address
 	}
 	log.WithFields(lf).Info("Starting MQTT server")
 
@@ -178,6 +185,14 @@ func (s *Server) setupTLS() error {
 	s.tlsL = l
 	go s.startDispatcher(l)
 	return nil
+}
+
+func (s *Server) setupWebsocket() error {
+	if !s.config.WS.Enabled {
+		return nil
+	}
+
+	return websocket.Setup(s.config.WS.Address, s.config.WS.CheckOrigin, s.startSession, s.errs)
 }
 
 func (s *Server) startDispatcher(l net.Listener) {
@@ -310,8 +325,7 @@ func (tt topicTree) removeClient(c *client) {
 	var unSub func(topicTree, topT)
 	unSub = func(sLevel topicTree, cLevel topT) {
 		for l, nCl := range cLevel {
-			nSl, present := sLevel[l]
-			if present {
+			if nSl, present := sLevel[l]; present {
 				delete(nSl.subscribers, c)
 				unSub(nSl.children, nCl.children)
 			}

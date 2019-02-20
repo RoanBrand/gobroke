@@ -8,5 +8,10 @@
 		"address": ":8883",
 		"cert": "certs/example.crt",
 		"key": "certs/example.key"
+	},
+	"ws": {
+		"enabled": true,
+		"address": ":80",
+		"check_origin": false
 	}
 }

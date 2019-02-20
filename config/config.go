@@ -8,22 +8,28 @@ import (
 )
 
 type Config struct {
-	TCP struct {
-		Enabled bool   `json:"enabled"`
-		Address string `json:"address"`
-	} `json:"tcp"`
+	TCP network `json:"tcp"`
 
 	TLS struct {
-		Enabled bool   `json:"enabled"`
-		Address string `json:"address"`
-		Cert    string `json:"cert"`
-		Key     string `json:"key"`
+		network
+		Cert string `json:"cert"`
+		Key  string `json:"key"`
 	} `json:"tls"`
+
+	WS struct {
+		network
+		CheckOrigin bool `json:"check_origin"`
+	} `json:"ws"`
 
 	Log struct {
 		File  string `json:"file"`
 		Level string `json:"level"`
 	} `json:"log"`
+}
+
+type network struct {
+	Enabled bool   `json:"enabled"`
+	Address string `json:"address"`
 }
 
 func New(fPath string) (*Config, error) {
@@ -45,8 +51,8 @@ func New(fPath string) (*Config, error) {
 }
 
 func (c *Config) validate() error {
-	if !c.TCP.Enabled && !c.TLS.Enabled {
-		return errors.New("at least one connection, TCP or TLS, needs to be setup")
+	if !c.TCP.Enabled && !c.TLS.Enabled && !c.WS.Enabled {
+		return errors.New("at least one connection (TCP, TLS or Websocket) needs to be setup")
 	}
 
 	if c.TCP.Enabled {
@@ -62,6 +68,12 @@ func (c *Config) validate() error {
 
 		if !strings.Contains(c.TLS.Address, ":") {
 			c.TLS.Address += ":8883"
+		}
+	}
+
+	if c.WS.Enabled {
+		if !strings.Contains(c.WS.Address, ":") {
+			c.WS.Address += ":80"
 		}
 	}
 
