@@ -11,10 +11,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var upgrader = websocket.Upgrader{
-	Subprotocols: []string{"mqtt"}, // [MQTT-6.0.0-4]
-}
-
 var dispatch func(net.Conn)
 
 func SetDispatcher(d func(net.Conn)) {
@@ -22,41 +18,44 @@ func SetDispatcher(d func(net.Conn)) {
 }
 
 func Setup(address string, checkOrigin bool, errs chan error) error {
-	if !checkOrigin {
-		upgrader.CheckOrigin = func(*http.Request) bool { return true }
-	}
 	go func() {
-		errs <- http.ListenAndServe(address, http.HandlerFunc(handler))
+		errs <- http.ListenAndServe(address, http.HandlerFunc(handler(checkOrigin)))
 	}()
 	return nil
 }
 
 func SetupTLS(address, certFile, keyFile string, checkOrigin bool, errs chan error) error {
-	if !checkOrigin {
-		upgrader.CheckOrigin = func(*http.Request) bool { return true }
-	}
 	go func() {
-		errs <- http.ListenAndServeTLS(address, certFile, keyFile, http.HandlerFunc(handler))
+		errs <- http.ListenAndServeTLS(address, certFile, keyFile, http.HandlerFunc(handler(checkOrigin)))
 	}()
 	return nil
 }
 
-func handler(w http.ResponseWriter, r *http.Request) {
-	if protos := websocket.Subprotocols(r); len(protos) == 0 || protos[0] != "mqtt" { // [MQTT-6.0.0-3]
-		errMsg := "websocket client not supported. Must be MQTT v3.1.1"
-		log.Debug(errMsg, " Client sub protocols:", protos)
-		http.Error(w, errMsg, http.StatusNotAcceptable)
-		return
+func handler(checkOrigin bool) func(w http.ResponseWriter, r *http.Request) {
+	up := websocket.Upgrader{
+		Subprotocols: []string{"mqtt"}, // [MQTT-6.0.0-4]
 	}
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		errMsg := "unsuccessful websocket negotiation: " + err.Error()
-		log.Debug(errMsg)
-		http.Error(w, errMsg, http.StatusInternalServerError)
-		return
+	if !checkOrigin {
+		up.CheckOrigin = func(*http.Request) bool { return true }
 	}
 
-	go dispatch(&wsConn{Conn: conn})
+	return func(w http.ResponseWriter, r *http.Request) {
+		if protos := websocket.Subprotocols(r); len(protos) == 0 || protos[0] != "mqtt" { // [MQTT-6.0.0-3]
+			errMsg := "websocket client not supported. Must be MQTT v3.1.1"
+			log.Debug(errMsg, " Client sub protocols:", protos)
+			http.Error(w, errMsg, http.StatusNotAcceptable)
+			return
+		}
+		conn, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			errMsg := "unsuccessful websocket negotiation: " + err.Error()
+			log.Debug(errMsg)
+			http.Error(w, errMsg, http.StatusInternalServerError)
+			return
+		}
+
+		go dispatch(&wsConn{Conn: conn})
+	}
 }
 
 type wsConn struct {
