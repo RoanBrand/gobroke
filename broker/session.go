@@ -34,7 +34,7 @@ func (s *session) run() {
 	go s.startWriter()
 
 	go s.qos0Pump()
-	go s.qos1Pump()
+	go s.qos1Pump() // [MQTT-4.4.0-1]
 	go s.qos2Pump()
 }
 
@@ -134,6 +134,16 @@ func (s *session) qos1Pump() {
 
 func (s *session) qos2Pump() {
 	c := s.client
+
+	// resend pending PUBRELs
+	for pr := c.q2QLast.Front(); pr != nil; pr = pr.Next() {
+		p := pr.Value.(*qosPub)
+		if err := s.writePacket(p.p); err != nil {
+			return
+		}
+		go s.qosMonitor(p, nil)
+	}
+
 	started := false
 	defer c.q2Lock.Unlock()
 
