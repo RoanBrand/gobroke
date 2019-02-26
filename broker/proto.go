@@ -86,7 +86,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					p.vhLen = 10
 				case PUBLISH:
 					p.vhLen = 0 // determined later
-				case PUBACK, PUBREL:
+				case PUBACK, PUBREC, PUBREL, PUBCOMP:
 					p.vhLen = 2
 				case SUBSCRIBE:
 					if p.remainingLength < 5 { // [MQTT-3.8.3-3]
@@ -145,7 +145,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 			if p.vhLen == 0 {
 				switch p.controlType {
-				case CONNECT: // TODO: handle other variable headers
+				case CONNECT:
 					if !bytes.Equal(connectPacket, p.vh[:7]) { // [MQTT-3.1.2-1]
 						ses.sendConnack(1) // [MQTT-3.1.2-2]
 						return protocolViolation("unsupported client protocol. Must be MQTT v3.1.1")
@@ -164,11 +164,19 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					}
 				case PUBACK:
 					ses.client.qos1Done(binary.BigEndian.Uint16(p.vh))
+				case PUBREC:
+					pubRel := []byte{PUBREL | 0x02, 2, p.vh[0], p.vh[1]}
+					ses.client.qos2Part1Done(binary.BigEndian.Uint16(p.vh), pubRel)
+					if err := ses.writePacket(pubRel); err != nil {
+						return err
+					}
 				case PUBREL: // [MQTT-4.3.3-2]
 					delete(ses.client.q2RxLookup, binary.BigEndian.Uint16(p.vh))
 					if err := ses.writePacket([]byte{PUBCOMP, 2, p.vh[0], p.vh[1]}); err != nil {
 						return err
 					}
+				case PUBCOMP:
+					ses.client.qos2Part2Done(binary.BigEndian.Uint16(p.vh))
 				}
 
 				p.payload = p.payload[:0]
@@ -281,8 +289,7 @@ func (s *Server) handleConnect(ses *session) error {
 			return protocolViolation("malformed CONNECT invalid will QoS level")
 		}
 
-		ses.will = makePub(p[wTopicUTFStart:wTopicUTFEnd], p[offs:offs+wMsgLen], wQoS)
-		ses.will.retain = ses.connectFlags&0x20 > 0
+		ses.will = makePub(p[wTopicUTFStart:wTopicUTFEnd], p[offs:offs+wMsgLen], wQoS, ses.connectFlags&0x20 > 0)
 		offs += wMsgLen
 
 	} else if ses.connectFlags&0x38 > 0 { // [MQTT-3.1.2-11, 2-13, 2-15]
@@ -333,6 +340,7 @@ func (s *Server) handlePublish(ses *session) error {
 	topicLen := int(binary.BigEndian.Uint16(p.vh))
 	topic := string(p.vh[2 : topicLen+2])
 	qos := (p.flags & 0x06) >> 1
+	retain := p.flags&0x01 > 0
 
 	lf := log.Fields{
 		"client":  ses.clientId,
@@ -340,28 +348,24 @@ func (s *Server) handlePublish(ses *session) error {
 		"QoS":     qos,
 		"payload": string(p.payload),
 	}
-
-	pub := makePub(p.vh[:topicLen+2], p.payload, qos)
-	pub.retain = p.flags&0x01 > 0
-
 	if p.flags&0x08 > 0 {
 		lf["duplicate"] = true
 	}
-	if pub.retain {
+	if retain {
 		lf["retain"] = true
 	}
 	log.WithFields(lf).Debug("Got PUBLISH packet")
 
 	switch p.flags & 0x06 {
 	case 0x00: // QoS 0
-		s.pubs <- pub
+		s.pubs <- makePub(p.vh[:topicLen+2], p.payload, qos, retain)
 	case 0x02: // QoS 1
-		s.pubs <- pub
+		s.pubs <- makePub(p.vh[:topicLen+2], p.payload, qos, retain)
 		return ses.writePacket([]byte{PUBACK, 2, byte(p.pID >> 8), byte(p.pID)})
 	case 0x04: // QoS 2 - [MQTT-4.3.3-2]
 		if _, present := ses.client.q2RxLookup[p.pID]; !present {
 			ses.client.q2RxLookup[p.pID] = struct{}{}
-			s.pubs <- pub
+			s.pubs <- makePub(p.vh[:topicLen+2], p.payload, qos, retain)
 		}
 		return ses.writePacket([]byte{PUBREC, 2, byte(p.pID >> 8), byte(p.pID)})
 	}
@@ -382,11 +386,8 @@ func (s *Server) handleSubscribe(ses *session) error {
 		if p[topicEnd]&0xFC != 0 { // [MQTT-3-8.3-4]
 			return protocolViolation("malformed SUBSCRIBE")
 		}
-		if p[topicEnd] == 2 {
-			p[topicEnd] = 1 // Grant max 1 for now. TODO: Support QoS 2
-		}
-		qoss = append(qoss, p[topicEnd])
 
+		qoss = append(qoss, p[topicEnd])
 		i += 3 + topicL
 	}
 

@@ -39,7 +39,7 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 ##### OS Service
 * Build then copy the binary and config file to a folder you want and run `gobroke -service install`
 * Service can then be started with `gobroke -service start` or from the OS Service Manager
-##### QoS 1
+##### QoS 1 & 2
 ##### TLS
 * Example self-signed certificates included that can be used by MQTT clients on `localhost`
 * Make sure MQTT client does not use regular TCP port (default `8883`, not `1883`)
@@ -56,7 +56,6 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 * Config path can be overridden with `gobroke -c="path_to_config_file"`
 
 ## TODO
-* QoS 2 Subscriptions (Clients are able to send QoS 2 messages currently though)
 * Persistence to survive restart
 * $SYS Topic
 * Rate limiting

@@ -290,15 +290,14 @@ type pub struct {
 	empty  bool // zero-byte payload
 }
 
-func makePub(topicUTF8, payload []byte, qos uint8) (p pub) {
+func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
 	p.topic = string(topicUTF8[2:])
 	p.pacs = make([][]byte, 3)
 	p.pubQoS = qos
 	tLen := len(topicUTF8)
 	pLen := len(payload)
-	if pLen == 0 {
-		p.empty = true
-	}
+	p.retain = retain
+	p.empty = pLen == 0
 
 	// QoS 0
 	p.pacs[0] = make([]byte, 1, 5+tLen+pLen) // ctrl 1 + remainLen 4max + topic(with2bytelen) + msgLen
@@ -319,7 +318,12 @@ func makePub(topicUTF8, payload []byte, qos uint8) (p pub) {
 
 		// QoS 2
 		if qos == 2 {
-			// TODO: parse qos2 first before this works
+			p.pacs[2] = make([]byte, 1, 7+tLen+pLen)
+			p.pacs[2][0] = PUBLISH | 0x04
+			p.pacs[2] = append(p.pacs[2], variableLengthEncode(2+tLen+pLen)...)
+			p.pacs[2] = append(p.pacs[2], topicUTF8...)
+			p.pacs[2] = append(p.pacs[2], 0, 0)
+			p.pacs[2] = append(p.pacs[2], payload...)
 		}
 	}
 	return

@@ -31,7 +31,13 @@ type client struct {
 	q1Lock   sync.Mutex
 
 	// QoS 2
-	q2RxLookup map[uint16]struct{}
+	q2RxLookup   map[uint16]struct{}
+	q2Q          *list.List // publish packets
+	q2Lookup     map[uint16]*list.Element
+	q2Trig       *sync.Cond
+	q2Lock       sync.Mutex
+	q2QLast      *list.List // publish IDs
+	q2LookupLast map[uint16]*list.Element
 
 	clear chan struct{}
 }
@@ -47,10 +53,15 @@ func newClient(ses *session) *client {
 		q1Q:           list.New(),
 		q1Lookup:      make(map[uint16]*list.Element, 2),
 		q2RxLookup:    make(map[uint16]struct{}, 2),
+		q2Q:           list.New(),
+		q2Lookup:      make(map[uint16]*list.Element, 2),
+		q2QLast:       list.New(),
+		q2LookupLast:  make(map[uint16]*list.Element, 2),
 		clear:         make(chan struct{}),
 	}
 	c.q0Trig = sync.NewCond(&c.q0Lock)
 	c.q1Trig = sync.NewCond(&c.q1Lock)
+	c.q2Trig = sync.NewCond(&c.q2Lock)
 
 	go c.run()
 	return &c
@@ -134,6 +145,20 @@ func (c *client) processPub(sp subPub) {
 		c.q1Lookup[c.publishId] = c.q1Q.PushBack(&qosPub{done: make(chan struct{}), p: pubP})
 		c.q1Trig.Signal()
 		c.q1Lock.Unlock()
+	case 2:
+		pubP := make([]byte, len(sp.p.pacs[2]))
+		copy(pubP, sp.p.pacs[2])
+		c.publishId++
+		pubP[sp.p.idLoc] = uint8(c.publishId >> 8)
+		pubP[sp.p.idLoc+1] = uint8(c.publishId)
+		if sp.retained {
+			pubP[0] |= 0x01
+		}
+
+		c.q2Lock.Lock()
+		c.q2Lookup[c.publishId] = c.q2Q.PushBack(&qosPub{done: make(chan struct{}), p: pubP})
+		c.q2Trig.Signal()
+		c.q2Lock.Unlock()
 	}
 }
 
@@ -150,6 +175,42 @@ func (c *client) qos1Done(pID uint16) {
 			"packetID": pID,
 		}).Error("Got PUBACK packet for none existing packet")
 	}
+}
+
+func (c *client) qos2Part1Done(pID uint16, pubRel []byte) {
+	c.q2Lock.Lock()
+	if qPub, ok := c.q2Lookup[pID]; ok {
+		close(c.q2Q.Remove(qPub).(*qosPub).done)
+		delete(c.q2Lookup, pID)
+	} else {
+		log.WithFields(log.Fields{
+			"client":   c.session.clientId,
+			"packetID": pID,
+		}).Error("Got PUBREC packet for none existing packet")
+	}
+
+	if _, ok := c.q2LookupLast[pID]; !ok {
+		pubR := &qosPub{done: make(chan struct{}), p: pubRel}
+		c.q2LookupLast[c.publishId] = c.q2QLast.PushBack(pubR)
+		go c.session.qosMonitor(pubR, nil)
+	}
+
+	c.q2Lock.Unlock()
+}
+
+func (c *client) qos2Part2Done(pID uint16) {
+	c.q2Lock.Lock()
+	if qPub, ok := c.q2LookupLast[pID]; ok {
+		close(c.q2QLast.Remove(qPub).(*qosPub).done)
+		delete(c.q2LookupLast, pID)
+	} else {
+		log.WithFields(log.Fields{
+			"client":   c.session.clientId,
+			"packetID": pID,
+		}).Error("Got PUBCOMP packet for none existing packet")
+	}
+
+	c.q2Lock.Unlock()
 }
 
 type topL struct {

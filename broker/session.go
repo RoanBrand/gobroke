@@ -31,14 +31,11 @@ type session struct {
 }
 
 func (s *session) run() {
-	// Writer
 	go s.startWriter()
 
-	// QoS 0
 	go s.qos0Pump()
-
-	// QoS 1
 	go s.qos1Pump()
+	go s.qos2Pump()
 }
 
 func (s *session) stop() {
@@ -48,12 +45,15 @@ func (s *session) stop() {
 		if c != nil {
 			c.q0Lock.Lock()
 			c.q1Lock.Lock()
+			c.q2Lock.Lock()
 			c.txLock.Lock()
 		}
 		s.dead = true
 		if c != nil {
 			c.txFlush <- struct{}{}
 			c.txLock.Unlock()
+			c.q2Trig.Signal()
+			c.q2Lock.Unlock()
 			c.q1Trig.Signal()
 			c.q1Lock.Unlock()
 			c.q0Trig.Signal()
@@ -89,6 +89,10 @@ func (s *session) qos0Pump() {
 	}
 }
 
+func setDUPFlag(pub []byte) {
+	pub[0] |= 0x08
+}
+
 func (s *session) qos1Pump() {
 	c := s.client
 	started := false
@@ -113,34 +117,73 @@ func (s *session) qos1Pump() {
 				if p.sent {
 					continue
 				}
-			} else {
-				if p.sent {
-					p.p[0] |= 0x08 // DUP
-				}
+			} else if p.sent {
+				p.p[0] |= 0x08 // DUP
+				setDUPFlag(p.p)
 			}
 			if err := s.writePacket(p.p); err != nil {
 				return
 			}
 			p.sent = true
-			go s.qos1Monitor(p)
+			go s.qosMonitor(p, setDUPFlag)
 		}
 		c.q1Lock.Unlock()
 		started = true
 	}
 }
 
-func (s *session) qos1Monitor(pub1 *qosPub) {
+func (s *session) qos2Pump() {
+	c := s.client
+	started := false
+	defer c.q2Lock.Unlock()
+
+	for {
+		c.q2Lock.Lock()
+		if s.dead {
+			return
+		}
+
+		if c.q2Q.Front() == nil {
+			c.q2Trig.Wait()
+		}
+		if s.dead {
+			return
+		}
+
+		for p2 := c.q2Q.Front(); p2 != nil; p2 = p2.Next() {
+			p := p2.Value.(*qosPub)
+			if started {
+				if p.sent {
+					continue
+				}
+			} else if p.sent {
+				setDUPFlag(p.p)
+			}
+			if err := s.writePacket(p.p); err != nil {
+				return
+			}
+			p.sent = true
+			go s.qosMonitor(p, setDUPFlag)
+		}
+		c.q2Lock.Unlock()
+		started = true
+	}
+}
+
+func (s *session) qosMonitor(pub *qosPub, preResend func([]byte)) {
 	t := time.NewTimer(time.Second * 20) // correct value or method?
 	for {
 		select {
-		case <-pub1.done:
+		case <-pub.done:
 			if !t.Stop() {
 				<-t.C
 			}
 			return
 		case <-t.C:
-			pub1.p[0] |= 0x08 // DUP
-			if err := s.writePacket(pub1.p); err != nil {
+			if preResend != nil {
+				preResend(pub.p)
+			}
+			if err := s.writePacket(pub.p); err != nil {
 				return
 			}
 			t.Reset(time.Second * 20)
