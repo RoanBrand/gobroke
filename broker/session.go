@@ -4,6 +4,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -16,7 +17,7 @@ type session struct {
 	packet  packet
 	rxState uint8
 
-	dead     bool
+	dead     int32
 	onlyOnce sync.Once
 
 	clientId        string
@@ -33,172 +34,23 @@ type session struct {
 func (s *session) run() {
 	go s.startWriter()
 
-	go s.qos0Pump()
-	go s.qos1Pump() // [MQTT-4.4.0-1]
-	go s.qos2Pump()
+	go s.client.q0.StartDispatcher(s.writePacket, &s.dead)
+	go s.client.q1.StartDispatcher(s.writePacket, &s.dead)
+	s.client.q2Stage2.ResendAll(s.writePacket)
+	go s.client.q2.StartDispatcher(s.writePacket, &s.dead)
 }
 
 func (s *session) stop() {
 	s.onlyOnce.Do(func() {
 		s.conn.Close()
-		c := s.client
-		if c != nil {
-			c.q0Lock.Lock()
-			c.q1Lock.Lock()
-			c.q2Lock.Lock()
-			c.txLock.Lock()
-		}
-		s.dead = true
-		if c != nil {
+		atomic.StoreInt32(&s.dead, 1)
+		if c := s.client; c != nil {
 			c.txFlush <- struct{}{}
-			c.txLock.Unlock()
-			c.q2Trig.Signal()
-			c.q2Lock.Unlock()
-			c.q1Trig.Signal()
-			c.q1Lock.Unlock()
-			c.q0Trig.Signal()
-			c.q0Lock.Unlock()
+			c.q0.Signal()
+			c.q1.Signal()
+			c.q2.Signal()
 		}
 	})
-}
-
-func (s *session) qos0Pump() {
-	c := s.client
-	defer c.q0Lock.Unlock()
-
-	for {
-		c.q0Lock.Lock()
-		if s.dead {
-			return
-		}
-
-		if c.q0Q.Front() == nil {
-			c.q0Trig.Wait()
-		}
-		if s.dead {
-			return
-		}
-
-		for p0 := c.q0Q.Front(); p0 != nil; p0 = p0.Next() {
-			if err := s.writePacket(p0.Value.([]byte)); err != nil {
-				return
-			}
-			c.q0Q.Remove(p0)
-		}
-		c.q0Lock.Unlock()
-	}
-}
-
-func setDUPFlag(pub []byte) {
-	pub[0] |= 0x08
-}
-
-func (s *session) qos1Pump() {
-	c := s.client
-	started := false
-	defer c.q1Lock.Unlock()
-
-	for {
-		c.q1Lock.Lock()
-		if s.dead {
-			return
-		}
-
-		if c.q1Q.Front() == nil {
-			c.q1Trig.Wait()
-		}
-		if s.dead {
-			return
-		}
-
-		for p1 := c.q1Q.Front(); p1 != nil; p1 = p1.Next() {
-			p := p1.Value.(*qosPub)
-			if started {
-				if p.sent {
-					continue
-				}
-			} else if p.sent {
-				p.p[0] |= 0x08 // DUP
-				setDUPFlag(p.p)
-			}
-			if err := s.writePacket(p.p); err != nil {
-				return
-			}
-			p.sent = true
-			go s.qosMonitor(p, setDUPFlag)
-		}
-		c.q1Lock.Unlock()
-		started = true
-	}
-}
-
-func (s *session) qos2Pump() {
-	c := s.client
-
-	// resend pending PUBRELs
-	for pr := c.q2QLast.Front(); pr != nil; pr = pr.Next() {
-		p := pr.Value.(*qosPub)
-		if err := s.writePacket(p.p); err != nil {
-			return
-		}
-		go s.qosMonitor(p, nil)
-	}
-
-	started := false
-	defer c.q2Lock.Unlock()
-
-	for {
-		c.q2Lock.Lock()
-		if s.dead {
-			return
-		}
-
-		if c.q2Q.Front() == nil {
-			c.q2Trig.Wait()
-		}
-		if s.dead {
-			return
-		}
-
-		for p2 := c.q2Q.Front(); p2 != nil; p2 = p2.Next() {
-			p := p2.Value.(*qosPub)
-			if started {
-				if p.sent {
-					continue
-				}
-			} else if p.sent {
-				setDUPFlag(p.p)
-			}
-			if err := s.writePacket(p.p); err != nil {
-				return
-			}
-			p.sent = true
-			go s.qosMonitor(p, setDUPFlag)
-		}
-		c.q2Lock.Unlock()
-		started = true
-	}
-}
-
-func (s *session) qosMonitor(pub *qosPub, preResend func([]byte)) {
-	t := time.NewTimer(time.Second * 20) // correct value or method?
-	for {
-		select {
-		case <-pub.done:
-			if !t.Stop() {
-				<-t.C
-			}
-			return
-		case <-t.C:
-			if preResend != nil {
-				preResend(pub.p)
-			}
-			if err := s.writePacket(pub.p); err != nil {
-				return
-			}
-			t.Reset(time.Second * 20)
-		}
-	}
 }
 
 func (s *session) updateTimeout() {
@@ -310,7 +162,7 @@ func (s *Server) startSession(conn net.Conn) {
 func (s *session) startWriter() {
 	for range s.client.txFlush {
 		s.client.txLock.Lock()
-		if s.dead {
+		if atomic.LoadInt32(&s.dead) == 1 {
 			s.client.txLock.Unlock()
 			return
 		}

@@ -2,9 +2,9 @@ package broker
 
 import (
 	"bufio"
-	"container/list"
 	"sync"
 
+	"github.com/RoanBrand/gobroke/internal/queue"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -19,25 +19,12 @@ type client struct {
 	pubRX     chan subPub // from server
 	publishId uint16
 
-	// QoS 0
-	q0Q    *list.List
-	q0Trig *sync.Cond
-	q0Lock sync.Mutex
-
-	// QoS 1
-	q1Q      *list.List
-	q1Lookup map[uint16]*list.Element
-	q1Trig   *sync.Cond
-	q1Lock   sync.Mutex
-
-	// QoS 2
-	q2RxLookup   map[uint16]struct{}
-	q2Q          *list.List // publish packets
-	q2Lookup     map[uint16]*list.Element
-	q2Trig       *sync.Cond
-	q2Lock       sync.Mutex
-	q2QLast      *list.List // publish IDs
-	q2LookupLast map[uint16]*list.Element
+	// Queued outbound messages
+	q0         queue.QoS0
+	q1         queue.QoS12
+	q2         queue.QoS12
+	q2Stage2   queue.QoS2Part2
+	q2RxLookup map[uint16]struct{}
 
 	clear chan struct{}
 }
@@ -49,19 +36,13 @@ func newClient(ses *session) *client {
 		tx:            bufio.NewWriter(ses.conn),
 		txFlush:       make(chan struct{}, 1),
 		pubRX:         make(chan subPub, 1),
-		q0Q:           list.New(),
-		q1Q:           list.New(),
-		q1Lookup:      make(map[uint16]*list.Element, 2),
 		q2RxLookup:    make(map[uint16]struct{}, 2),
-		q2Q:           list.New(),
-		q2Lookup:      make(map[uint16]*list.Element, 2),
-		q2QLast:       list.New(),
-		q2LookupLast:  make(map[uint16]*list.Element, 2),
 		clear:         make(chan struct{}),
 	}
-	c.q0Trig = sync.NewCond(&c.q0Lock)
-	c.q1Trig = sync.NewCond(&c.q1Lock)
-	c.q2Trig = sync.NewCond(&c.q2Lock)
+	c.q0.Init()
+	c.q1.Init()
+	c.q2.Init()
+	c.q2Stage2.Init()
 
 	go c.run()
 	return &c
@@ -81,17 +62,10 @@ func (c *client) run() {
 
 func (c *client) clearState() {
 	c.publishId = 0
-
-	c.q0Lock.Lock()
-	c.q0Q.Init()
-	c.q0Lock.Unlock()
-
-	c.q1Lock.Lock()
-	c.q1Q.Init()
-	for i := range c.q1Lookup {
-		delete(c.q1Lookup, i)
-	}
-	c.q1Lock.Unlock()
+	c.q0.Reset()
+	c.q1.Reset()
+	c.q2.Reset()
+	c.q2Stage2.Reset()
 
 	for i := range c.q2RxLookup {
 		delete(c.q2RxLookup, i)
@@ -105,12 +79,6 @@ func (c *client) replaceSession(s *session) {
 	c.session = s
 }
 
-type qosPub struct {
-	done chan struct{}
-	p    []byte
-	sent bool
-}
-
 func (c *client) processPub(sp subPub) {
 	finalQoS := sp.p.pubQoS
 	if sp.maxQoS < sp.p.pubQoS {
@@ -122,15 +90,12 @@ func (c *client) processPub(sp subPub) {
 		var pubP []byte
 		if sp.retained {
 			pubP = make([]byte, len(sp.p.pacs[0]))
-			pubP[0] |= 0x01
+			pubP[0] |= 0x01 // TODO: no copy? and explain why making copy here
 		} else {
 			pubP = sp.p.pacs[0]
 		}
 
-		c.q0Lock.Lock()
-		c.q0Q.PushBack(pubP)
-		c.q0Trig.Signal()
-		c.q0Lock.Unlock()
+		c.q0.Add(pubP)
 	case 1:
 		pubP := make([]byte, len(sp.p.pacs[1]))
 		copy(pubP, sp.p.pacs[1])
@@ -141,10 +106,7 @@ func (c *client) processPub(sp subPub) {
 			pubP[0] |= 0x01
 		}
 
-		c.q1Lock.Lock()
-		c.q1Lookup[c.publishId] = c.q1Q.PushBack(&qosPub{done: make(chan struct{}), p: pubP})
-		c.q1Trig.Signal()
-		c.q1Lock.Unlock()
+		c.q1.Add(c.publishId, pubP)
 	case 2:
 		pubP := make([]byte, len(sp.p.pacs[2]))
 		copy(pubP, sp.p.pacs[2])
@@ -155,21 +117,12 @@ func (c *client) processPub(sp subPub) {
 			pubP[0] |= 0x01
 		}
 
-		c.q2Lock.Lock()
-		c.q2Lookup[c.publishId] = c.q2Q.PushBack(&qosPub{done: make(chan struct{}), p: pubP})
-		c.q2Trig.Signal()
-		c.q2Lock.Unlock()
+		c.q2.Add(c.publishId, pubP)
 	}
 }
 
 func (c *client) qos1Done(pID uint16) {
-	c.q1Lock.Lock()
-	if qPub, ok := c.q1Lookup[pID]; ok {
-		close(c.q1Q.Remove(qPub).(*qosPub).done)
-		delete(c.q1Lookup, pID)
-		c.q1Lock.Unlock()
-	} else {
-		c.q1Lock.Unlock()
+	if !c.q1.Remove(pID) {
 		log.WithFields(log.Fields{
 			"client":   c.session.clientId,
 			"packetID": pID,
@@ -178,39 +131,23 @@ func (c *client) qos1Done(pID uint16) {
 }
 
 func (c *client) qos2Part1Done(pID uint16, pubRel []byte) {
-	c.q2Lock.Lock()
-	if qPub, ok := c.q2Lookup[pID]; ok {
-		close(c.q2Q.Remove(qPub).(*qosPub).done)
-		delete(c.q2Lookup, pID)
-	} else {
+	if !c.q2.Remove(pID) {
 		log.WithFields(log.Fields{
 			"client":   c.session.clientId,
 			"packetID": pID,
 		}).Error("Got PUBREC packet for none existing packet")
 	}
 
-	if _, ok := c.q2LookupLast[pID]; !ok {
-		pubR := &qosPub{done: make(chan struct{}), p: pubRel}
-		c.q2LookupLast[c.publishId] = c.q2QLast.PushBack(pubR)
-		go c.session.qosMonitor(pubR, nil)
-	}
-
-	c.q2Lock.Unlock()
+	c.q2Stage2.Add(pID, pubRel, c.session.writePacket)
 }
 
 func (c *client) qos2Part2Done(pID uint16) {
-	c.q2Lock.Lock()
-	if qPub, ok := c.q2LookupLast[pID]; ok {
-		close(c.q2QLast.Remove(qPub).(*qosPub).done)
-		delete(c.q2LookupLast, pID)
-	} else {
+	if !c.q2Stage2.Remove(pID) {
 		log.WithFields(log.Fields{
 			"client":   c.session.clientId,
 			"packetID": pID,
 		}).Error("Got PUBCOMP packet for none existing packet")
 	}
-
-	c.q2Lock.Unlock()
 }
 
 type topL struct {

@@ -4,13 +4,13 @@
 		"address": ":1883"
 	},
 	"tls": {
-		"enabled": true,
+		"enabled": false,
 		"address": ":8883",
 		"cert": "certs/example.crt",
 		"key": "certs/example.key"
 	},
 	"ws": {
-		"enabled": true,
+		"enabled": false,
 		"address": ":80",
 		"check_origin": false
 	}
