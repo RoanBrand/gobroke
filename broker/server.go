@@ -302,7 +302,7 @@ func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
 	// QoS 0
 	p.pacs[0] = make([]byte, 1, 5+tLen+pLen) // ctrl 1 + remainLen 4max + topic(with2bytelen) + msgLen
 	p.pacs[0][0] = PUBLISH
-	p.pacs[0] = append(p.pacs[0], variableLengthEncode(tLen+pLen)...)
+	p.pacs[0] = variableLengthEncode(p.pacs[0], tLen+pLen)
 	p.pacs[0] = append(p.pacs[0], topicUTF8...) // 2 bytes + topic
 	p.pacs[0] = append(p.pacs[0], payload...)
 
@@ -310,7 +310,7 @@ func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
 	if qos > 0 {
 		p.pacs[1] = make([]byte, 1, 7+tLen+pLen) // ctrl 1 + remainLen 4max + topic(with2bytelen) + pID 2 + msgLen
 		p.pacs[1][0] = PUBLISH | 0x02
-		p.pacs[1] = append(p.pacs[1], variableLengthEncode(2+tLen+pLen)...)
+		p.pacs[1] = variableLengthEncode(p.pacs[1], 2+tLen+pLen)
 		p.pacs[1] = append(p.pacs[1], topicUTF8...)
 		p.idLoc = len(p.pacs[1])
 		p.pacs[1] = append(p.pacs[1], 0, 0) // pID
@@ -320,7 +320,7 @@ func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
 		if qos == 2 {
 			p.pacs[2] = make([]byte, 1, 7+tLen+pLen)
 			p.pacs[2][0] = PUBLISH | 0x04
-			p.pacs[2] = append(p.pacs[2], variableLengthEncode(2+tLen+pLen)...)
+			p.pacs[2] = variableLengthEncode(p.pacs[2], 2+tLen+pLen)
 			p.pacs[2] = append(p.pacs[2], topicUTF8...)
 			p.pacs[2] = append(p.pacs[2], 0, 0)
 			p.pacs[2] = append(p.pacs[2], payload...)

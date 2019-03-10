@@ -338,23 +338,24 @@ func (s *Server) handleConnect(ses *session) error {
 func (s *Server) handlePublish(ses *session) error {
 	p := &ses.packet
 	topicLen := int(binary.BigEndian.Uint16(p.vh))
-	topic := string(p.vh[2 : topicLen+2])
 	qos := (p.flags & 0x06) >> 1
 	retain := p.flags&0x01 > 0
 
-	lf := log.Fields{
-		"client":  ses.clientId,
-		"topic":   topic,
-		"QoS":     qos,
-		"payload": string(p.payload),
+	if log.IsLevelEnabled(log.DebugLevel) {
+		lf := log.Fields{
+			"client":  ses.clientId,
+			"topic":   string(p.vh[2 : topicLen+2]),
+			"QoS":     qos,
+			"payload": string(p.payload),
+		}
+		if p.flags&0x08 > 0 {
+			lf["duplicate"] = true
+		}
+		if retain {
+			lf["retain"] = true
+		}
+		log.WithFields(lf).Debug("Got PUBLISH packet")
 	}
-	if p.flags&0x08 > 0 {
-		lf["duplicate"] = true
-	}
-	if retain {
-		lf["retain"] = true
-	}
-	log.WithFields(lf).Debug("Got PUBLISH packet")
 
 	switch p.flags & 0x06 {
 	case 0x00: // QoS 0
@@ -402,7 +403,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 	tl := len(topics)
 	subackP := make([]byte, 1, tl+7)
 	subackP[0] = SUBACK
-	subackP = append(subackP, variableLengthEncode(tl+2)...)
+	subackP = variableLengthEncode(subackP, tl+2)
 	subackP = append(subackP, ses.packet.vh[0], ses.packet.vh[1]) // [MQTT-3.8.4-2]
 	subackP = append(subackP, qoss...)                            // [MQTT-3.9.3-1]
 
@@ -432,18 +433,17 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 	return ses.writePacket([]byte{UNSUBACK, 2, ses.packet.vh[0], ses.packet.vh[1]})
 }
 
-func variableLengthEncode(l int) []byte {
-	res := make([]byte, 0, 2)
+func variableLengthEncode(packet []byte, l int) []byte {
 	for {
 		eb := l % 128
 		l /= 128
 		if l > 0 {
 			eb |= 128
 		}
-		res = append(res, byte(eb))
+		packet = append(packet, byte(eb))
 		if l <= 0 {
 			break
 		}
 	}
-	return res
+	return packet
 }
