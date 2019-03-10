@@ -85,20 +85,21 @@ func (c *client) processPub(sp subPub) {
 		finalQoS = sp.maxQoS
 	}
 
-	switch finalQoS {
-	case 0:
+	if finalQoS == 0 {
 		var pubP []byte
 		if sp.retained {
+			// Make copy, otherwise we race with original packet being sent out without retain flag set.
 			pubP = make([]byte, len(sp.p.pacs[0]))
-			pubP[0] |= 0x01 // TODO: no copy? and explain why making copy here
+			copy(pubP, sp.p.pacs[0])
+			pubP[0] |= 0x01
 		} else {
 			pubP = sp.p.pacs[0]
 		}
 
 		c.q0.Add(pubP)
-	case 1:
-		pubP := make([]byte, len(sp.p.pacs[1]))
-		copy(pubP, sp.p.pacs[1])
+	} else { // QoS 1 & 2
+		pubP := make([]byte, len(sp.p.pacs[finalQoS]))
+		copy(pubP, sp.p.pacs[finalQoS])
 		c.publishId++
 		pubP[sp.p.idLoc] = uint8(c.publishId >> 8)
 		pubP[sp.p.idLoc+1] = uint8(c.publishId)
@@ -106,18 +107,11 @@ func (c *client) processPub(sp subPub) {
 			pubP[0] |= 0x01
 		}
 
-		c.q1.Add(c.publishId, pubP)
-	case 2:
-		pubP := make([]byte, len(sp.p.pacs[2]))
-		copy(pubP, sp.p.pacs[2])
-		c.publishId++
-		pubP[sp.p.idLoc] = uint8(c.publishId >> 8)
-		pubP[sp.p.idLoc+1] = uint8(c.publishId)
-		if sp.retained {
-			pubP[0] |= 0x01
+		if finalQoS == 1 {
+			c.q1.Add(c.publishId, pubP)
+		} else {
+			c.q2.Add(c.publishId, pubP)
 		}
-
-		c.q2.Add(c.publishId, pubP)
 	}
 }
 

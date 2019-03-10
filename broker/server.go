@@ -292,7 +292,7 @@ type pub struct {
 
 func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
 	p.topic = string(topicUTF8[2:])
-	p.pacs = make([][]byte, 3)
+	p.pacs = make([][]byte, qos+1)
 	p.pubQoS = qos
 	tLen := len(topicUTF8)
 	pLen := len(payload)
