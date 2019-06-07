@@ -213,8 +213,7 @@ func (q *QoS12) StartDispatcher(write func([]byte) error, killed *int32) {
 // Exit if message has been acknowledged and removed from queue.
 // Set isPub to false if PUBREL, so not to set DUP on resend.
 func monitor(write func([]byte) error, m *msg, isPub bool) {
-	t := time.NewTimer(time.Second * 20) // correct value or method?
-	for {
+	for t := time.NewTimer(time.Second * 20); ; { // correct value or method?
 		select {
 		case <-m.done:
 			if !t.Stop() {

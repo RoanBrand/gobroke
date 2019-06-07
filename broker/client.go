@@ -98,8 +98,8 @@ func (c *client) processPub(sp subPub) {
 
 		c.q0.Add(pubP)
 	} else { // QoS 1 & 2
-		pubP := make([]byte, len(sp.p.pacs[finalQoS]))
-		copy(pubP, sp.p.pacs[finalQoS])
+		pubP := make([]byte, len(sp.p.pacs[1]))
+		copy(pubP, sp.p.pacs[1])
 		c.publishId++
 		pubP[sp.p.idLoc] = uint8(c.publishId >> 8)
 		pubP[sp.p.idLoc+1] = uint8(c.publishId)
@@ -107,6 +107,7 @@ func (c *client) processPub(sp subPub) {
 			pubP[0] |= 0x01
 		}
 
+		pubP[0] |= finalQoS << 1
 		if finalQoS == 1 {
 			c.q1.Add(c.publishId, pubP)
 		} else {

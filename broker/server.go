@@ -285,14 +285,18 @@ type pub struct {
 	topic  string
 	pacs   [][]byte // packets of all QoS levels
 	pubQoS uint8
-	idLoc  int // index of publishID in packet when QoS > 0
+	idLoc  uint32 // index of publishID in packet when QoS > 0
 	retain bool
 	empty  bool // zero-byte payload
 }
 
 func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
 	p.topic = string(topicUTF8[2:])
-	p.pacs = make([][]byte, qos+1)
+	if qos == 0 {
+		p.pacs = make([][]byte, 1)
+	} else {
+		p.pacs = make([][]byte, 2)
+	}
 	p.pubQoS = qos
 	tLen := len(topicUTF8)
 	pLen := len(payload)
@@ -306,25 +310,15 @@ func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
 	p.pacs[0] = append(p.pacs[0], topicUTF8...) // 2 bytes + topic
 	p.pacs[0] = append(p.pacs[0], payload...)
 
-	// QoS 1
+	// QoS 1 & 2 - each client needs to mask control byte with QoS, and set pubID
 	if qos > 0 {
 		p.pacs[1] = make([]byte, 1, 7+tLen+pLen) // ctrl 1 + remainLen 4max + topic(with2bytelen) + pID 2 + msgLen
-		p.pacs[1][0] = PUBLISH | 0x02
+		p.pacs[1][0] = PUBLISH                   // unmasked
 		p.pacs[1] = variableLengthEncode(p.pacs[1], 2+tLen+pLen)
 		p.pacs[1] = append(p.pacs[1], topicUTF8...)
-		p.idLoc = len(p.pacs[1])
-		p.pacs[1] = append(p.pacs[1], 0, 0) // pID
+		p.idLoc = uint32(len(p.pacs[1]))
+		p.pacs[1] = append(p.pacs[1], 0, 0) // pID unset
 		p.pacs[1] = append(p.pacs[1], payload...)
-
-		// QoS 2
-		if qos == 2 {
-			p.pacs[2] = make([]byte, 1, 7+tLen+pLen)
-			p.pacs[2][0] = PUBLISH | 0x04
-			p.pacs[2] = variableLengthEncode(p.pacs[2], 2+tLen+pLen)
-			p.pacs[2] = append(p.pacs[2], topicUTF8...)
-			p.pacs[2] = append(p.pacs[2], 0, 0)
-			p.pacs[2] = append(p.pacs[2], payload...)
-		}
 	}
 	return
 }
@@ -373,29 +367,27 @@ func (s *Server) addSubscriptions(subs *subList) {
 		tLevels := strings.Split(t, "/")
 		sLev, cLev := s.subscriptions, subs.c.subscriptions
 
+		var sT *topicLevel
+		var ok bool
 		for n, tl := range tLevels {
 			// Server subscriptions
-			sT, present := sLev[tl]
-			if !present {
+			if sT, ok = sLev[tl]; !ok {
 				sLev[tl] = &topicLevel{}
 				sT = sLev[tl]
 				sT.init(size(n))
 			}
 
 			// Client's subscriptions
-			sC, present := cLev[tl]
-			if !present {
+			sC, ok := cLev[tl]
+			if !ok {
 				cLev[tl] = &topL{}
 				sC = cLev[tl]
 				sC.children = make(topT, size(n))
 			}
 
-			if n < len(tLevels)-1 {
-				sLev, cLev = sT.children, sC.children
-			} else {
-				sT.subscribers[subs.c] = subs.qoss[i]
-			}
+			sLev, cLev = sT.children, sC.children
 		}
+		sT.subscribers[subs.c] = subs.qoss[i]
 
 		// Retained messages
 		forwardLevel := func(l *retainLevel) {
@@ -459,23 +451,22 @@ func (s *Server) addSubscriptions(subs *subList) {
 	}
 }
 
+// TODO: remove subs from client state as well.
 func (s *Server) removeSubscriptions(subs *subList) {
+loop:
 	for _, t := range subs.topics {
 		tLevels := strings.Split(t, "/")
 		l := s.subscriptions
 
-		for n, tl := range tLevels {
-			nl, present := l[tl]
-			if !present {
-				break
+		var nl *topicLevel
+		var ok bool
+		for _, tl := range tLevels {
+			if nl, ok = l[tl]; !ok {
+				continue loop
 			}
-
-			if n < len(tLevels)-1 {
-				l = nl.children
-			} else {
-				delete(nl.subscribers, subs.c)
-			}
+			l = nl.children
 		}
+		delete(nl.subscribers, subs.c)
 	}
 }
 
@@ -527,29 +518,28 @@ func (s *Server) matchSubscriptions(p *pub) {
 			}
 		}
 	}
-
 	matchLevel(s.subscriptions, 0)
+
 	if !p.retain {
 		return
 	}
 
 	tr := s.retained
-	for n, tl := range tLevels {
-		nl, ok := tr[tl]
-		if !ok {
+	var nl *retainLevel
+	var ok bool
+	for _, tl := range tLevels {
+		if nl, ok = tr[tl]; !ok {
 			tr[tl] = &retainLevel{children: make(retainTree, 1)}
 			nl = tr[tl]
 		}
 
-		if n < len(tLevels)-1 {
-			tr = nl.children
-		} else {
-			if p.empty {
-				nl.p = nil
-			} else {
-				nl.p = p
-			}
-		}
+		tr = nl.children
+	}
+
+	if p.empty {
+		nl.p = nil // delete existing retained message
+	} else {
+		nl.p = p
 	}
 }
 
