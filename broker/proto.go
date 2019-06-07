@@ -163,7 +163,14 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						p.pID = binary.BigEndian.Uint16(p.vh[len(p.vh)-2:])
 					}
 				case PUBACK:
-					ses.client.qos1Done(binary.BigEndian.Uint16(p.vh))
+					pubID := binary.BigEndian.Uint16(p.vh)
+					if ses.client.qos1Done(pubID) {
+						cIDLen := uint16(len(ses.clientId))
+						err := s.state.RemovePub(append([]byte{byte(cIDLen >> 8), byte(cIDLen)}, []byte(ses.clientId)...), 1, pubID)
+						if err != nil {
+							log.Error(err)
+						}
+					}
 				case PUBREC:
 					pubRel := []byte{PUBREL | 0x02, 2, p.vh[0], p.vh[1]}
 					ses.client.qos2Part1Done(binary.BigEndian.Uint16(p.vh), pubRel)
@@ -249,6 +256,9 @@ func (s *Server) handleConnect(ses *session) error {
 
 	if clientIdLen > 0 {
 		ses.clientId = string(p[2:offs])
+		if ses.clientId == "MQTT_FX_Client00" {
+			ses.keepAlive /= 3
+		}
 	} else {
 		if ses.persistent() { // [MQTT-3.1.3-7]
 			ses.sendConnack(2) // [MQTT-3.1.3-8]
@@ -376,17 +386,21 @@ func (s *Server) handlePublish(ses *session) error {
 
 func (s *Server) handleSubscribe(ses *session) error {
 	p := ses.packet.payload
-	topics := make([]string, 0, 2)
+	topics := make([][]byte, 0, 2)
 	qoss := make([]uint8, 0, 2)
 	i := 0
 
 	for i < len(p) {
 		topicL := int(binary.BigEndian.Uint16(p[i:]))
 		topicEnd := i + 2 + topicL
-		topics = append(topics, string(p[i+2:topicEnd]))
 		if p[topicEnd]&0xFC != 0 { // [MQTT-3-8.3-4]
 			return protocolViolation("malformed SUBSCRIBE")
 		}
+
+		t := p[i:topicEnd]
+		topic := make([]byte, len(t))
+		copy(topic, t)
+		topics = append(topics, topic)
 
 		qoss = append(qoss, p[topicEnd])
 		i += 3 + topicL
@@ -412,13 +426,16 @@ func (s *Server) handleSubscribe(ses *session) error {
 
 func (s *Server) handleUnsubscribe(ses *session) error {
 	p := ses.packet.payload
-	topics := make([]string, 0, 2)
+	topics := make([][]byte, 0, 2)
 	i := 0
 
 	for i < len(p) {
 		topicL := int(binary.BigEndian.Uint16(p[i:]))
 		topicEnd := i + 2 + topicL
-		topics = append(topics, string(p[i+2:topicEnd]))
+		t := p[i:topicEnd]
+		topic := make([]byte, len(t))
+		copy(topic, t)
+		topics = append(topics, topic)
 		i += 2 + topicEnd
 	}
 

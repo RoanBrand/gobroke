@@ -16,7 +16,7 @@ type client struct {
 	txFlush chan struct{}
 	txLock  sync.Mutex
 
-	pubRX     chan subPub // from server
+	//pubRX     chan subPub // from server
 	publishId uint16
 
 	// Queued outbound messages
@@ -35,7 +35,7 @@ func newClient(ses *session) *client {
 		subscriptions: make(topT, 4),
 		tx:            bufio.NewWriter(ses.conn),
 		txFlush:       make(chan struct{}, 1),
-		pubRX:         make(chan subPub, 1),
+		//pubRX:         make(chan subPub, 1),
 		q2RxLookup:    make(map[uint16]struct{}, 2),
 		clear:         make(chan struct{}),
 	}
@@ -51,8 +51,8 @@ func newClient(ses *session) *client {
 func (c *client) run() {
 	for {
 		select {
-		case p := <-c.pubRX:
-			c.processPub(p)
+		/*case p := <-c.pubRX:
+			c.processPub(p)*/
 		case <-c.clear:
 			c.clearState()
 			c.clear <- struct{}{}
@@ -79,7 +79,7 @@ func (c *client) replaceSession(s *session) {
 	c.session = s
 }
 
-func (c *client) processPub(sp subPub) {
+/*func (c *client) processPub(sp subPub) {
 	finalQoS := sp.p.pubQoS
 	if sp.maxQoS < sp.p.pubQoS {
 		finalQoS = sp.maxQoS
@@ -114,15 +114,17 @@ func (c *client) processPub(sp subPub) {
 			c.q2.Add(c.publishId, pubP)
 		}
 	}
-}
+}*/
 
-func (c *client) qos1Done(pID uint16) {
+func (c *client) qos1Done(pID uint16) bool {
 	if !c.q1.Remove(pID) {
 		log.WithFields(log.Fields{
 			"client":   c.session.clientId,
 			"packetID": pID,
 		}).Error("Got PUBACK packet for none existing packet")
+		return false
 	}
+	return true
 }
 
 func (c *client) qos2Part1Done(pID uint16, pubRel []byte) {

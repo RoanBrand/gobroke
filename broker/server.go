@@ -3,12 +3,14 @@ package broker
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"net"
 	"os"
 	"strings"
 
 	"github.com/RoanBrand/gobroke/config"
+	"github.com/RoanBrand/gobroke/internal/store"
 	"github.com/RoanBrand/gobroke/websocket"
 	log "github.com/sirupsen/logrus"
 )
@@ -16,6 +18,18 @@ import (
 const (
 	serverBuffer = 1024
 )
+
+type serverStore interface {
+	LoadSubs(iter func(topic, cID string, subQoS uint8)) error
+	AddSubs(cID []byte, topics [][]byte, QoSs []uint8) error
+	RemoveSubs(cID []byte, topics [][]byte) error
+
+	LoadPubs(cID []byte, iter func(p []byte, QoS uint8, pubID uint16)) error
+	ForwardPub(cID, packet []byte, QoS uint8, pubIDIdx uint32) (pubID uint16, err error)
+	RemovePub(cID []byte, QoS uint8, pubID uint16) error
+
+	Close() error
+}
 
 type Server struct {
 	config        *config.Config
@@ -31,6 +45,8 @@ type Server struct {
 	pubs        chan pub
 
 	tcpL, tlsL net.Listener
+
+	state serverStore
 }
 
 func NewServer(confPath string) (*Server, error) {
@@ -61,6 +77,11 @@ func NewServer(confPath string) (*Server, error) {
 		}
 	}
 
+	sstore, err := store.NewDiskStore(`c:\mqttdatadir`)
+	if err != nil {
+		return nil, err
+	}
+
 	s := Server{
 		config:        conf,
 		clients:       make(map[string]*client, 16),
@@ -72,8 +93,17 @@ func NewServer(confPath string) (*Server, error) {
 		subscribe:     make(chan subList),
 		unsubscribe:   make(chan subList),
 		pubs:          make(chan pub, serverBuffer),
+
+		state: sstore,
 	}
 
+	// Saved state
+	err = s.loadSubscriptions()
+	if err != nil {
+		return nil, err
+	}
+
+	// Network connections.
 	if err := s.setupTCP(); err != nil {
 		return nil, err
 	}
@@ -105,6 +135,7 @@ func (s *Server) Stop() {
 	if s.tlsL != nil {
 		s.tlsL.Close()
 	}
+	s.state.Close()
 }
 
 func (s *Server) run() {
@@ -228,15 +259,16 @@ func (s *Server) startDispatcher(l net.Listener) {
 }
 
 func (s *Server) addSession(newses *session) {
+	cID := newses.clientId
 	log.WithFields(log.Fields{
-		"client": newses.clientId,
+		"client": cID,
 	}).Info("New session")
 
 	// [MQTT-3.1.2-4]
-	c, present := s.clients[newses.clientId]
+	c, present := s.clients[cID]
 	if present {
 		log.WithFields(log.Fields{
-			"client": newses.clientId,
+			"client": cID,
 		}).Debug("Old session present")
 
 		newses.notFirstSession = true
@@ -244,7 +276,7 @@ func (s *Server) addSession(newses *session) {
 
 		if newses.persistent() && c.session.persistent() {
 			log.WithFields(log.Fields{
-				"client": newses.clientId,
+				"client": cID,
 			}).Debug("New session inheriting previous client state")
 		} else {
 			s.subscriptions.removeClient(c)
@@ -253,8 +285,24 @@ func (s *Server) addSession(newses *session) {
 		}
 		c.replaceSession(newses)
 	} else {
-		s.clients[newses.clientId] = newClient(newses)
-		c = s.clients[newses.clientId]
+		s.clients[cID] = newClient(newses)
+		c = s.clients[cID]
+
+		// load any queued messages from disk
+		cIDLen := uint16(len(cID))
+		err := s.state.LoadPubs(append([]byte{byte(cIDLen >> 8), byte(cIDLen)}, []byte(cID)...), func(p []byte, QoS uint8, pubID uint16) {
+			switch QoS {
+			case 0:
+				c.q0.Add(p)
+			case 1:
+				c.q1.Add(pubID, p)
+			case 2:
+				c.q2.Add(pubID, p)
+			}
+		})
+		if err != nil {
+			log.Error(err)
+		}
 	}
 
 	newses.client = c
@@ -277,7 +325,7 @@ func (s *Server) removeClient(c *client) {
 
 type subList struct {
 	c      *client
-	topics []string
+	topics [][]byte // MQTT UTF-8. 2 byte len + str
 	qoss   []uint8
 }
 
@@ -286,8 +334,8 @@ type pub struct {
 	pacs   [][]byte // packets of all QoS levels
 	pubQoS uint8
 	idLoc  uint32 // index of publishID in packet when QoS > 0
-	retain bool
-	empty  bool // zero-byte payload
+	retain bool   // this pub is to be retained on the topic
+	empty  bool   // zero-byte payload
 }
 
 func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
@@ -298,9 +346,9 @@ func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
 		p.pacs = make([][]byte, 2)
 	}
 	p.pubQoS = qos
+	p.retain = retain
 	tLen := len(topicUTF8)
 	pLen := len(payload)
-	p.retain = retain
 	p.empty = pLen == 0
 
 	// QoS 0
@@ -325,12 +373,12 @@ func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
 
 type topicLevel struct {
 	children    topicTree
-	subscribers map[*client]uint8 // client -> QoS level
+	subscribers map[string]uint8 // clientID -> QoS level
 }
 
 func (tl *topicLevel) init(size int) {
 	tl.children = make(topicTree, size)
-	tl.subscribers = make(map[*client]uint8, size)
+	tl.subscribers = make(map[string]uint8, size)
 }
 
 type topicTree map[string]*topicLevel // level -> sub levels
@@ -341,7 +389,7 @@ func (tt topicTree) removeClient(c *client) {
 	unSub = func(sLevel topicTree, cLevel topT) {
 		for l, nCl := range cLevel {
 			if nSl, present := sLevel[l]; present {
-				delete(nSl.subscribers, c)
+				delete(nSl.subscribers, c.session.clientId)
 				unSub(nSl.children, nCl.children)
 			}
 		}
@@ -350,21 +398,46 @@ func (tt topicTree) removeClient(c *client) {
 	unSub(tt, c.subscriptions)
 }
 
+// Load all saved client subscriptions on startup.
+func (s *Server) loadSubscriptions() error {
+	first := true
+	var oldT string
+	var sT *topicLevel
+
+	return s.state.LoadSubs(func(topic, cID string, subQoS uint8) {
+		if first || topic != oldT {
+			tLevels := strings.Split(topic, "/")
+			sLev := s.subscriptions
+
+			var ok bool
+			for n, tl := range tLevels {
+				if sT, ok = sLev[tl]; !ok {
+					sLev[tl] = &topicLevel{}
+					sT = sLev[tl]
+					sT.init(size(n))
+				}
+
+				sLev = sT.children
+			}
+		}
+
+		fmt.Println("add server sub for clientID", cID, "Topic:", topic)
+		sT.subscribers[cID] = subQoS
+		first, oldT = false, topic
+	})
+}
+
 // Add subscriptions for client. Also check for matching retained messages.
 func (s *Server) addSubscriptions(subs *subList) {
-	size := func(n int) (s int) {
-		if n < 8 {
-			s = 4
-		} else if n < 16 {
-			s = 2
-		} else {
-			s = 1
-		}
-		return
+	cID := subs.c.session.clientId
+	cIDLen := uint16(len(cID))
+	err := s.state.AddSubs(append([]byte{byte(cIDLen >> 8), byte(cIDLen)}, []byte(cID)...), subs.topics, subs.qoss)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	for i, t := range subs.topics {
-		tLevels := strings.Split(t, "/")
+		tLevels := strings.Split(string(t[2:]), "/")
 		sLev, cLev := s.subscriptions, subs.c.subscriptions
 
 		var sT *topicLevel
@@ -387,12 +460,13 @@ func (s *Server) addSubscriptions(subs *subList) {
 
 			sLev, cLev = sT.children, sC.children
 		}
-		sT.subscribers[subs.c] = subs.qoss[i]
+		sT.subscribers[cID] = subs.qoss[i]
 
 		// Retained messages
 		forwardLevel := func(l *retainLevel) {
 			if l.p != nil {
-				subs.c.pubRX <- subPub{l.p, subs.qoss[i], true}
+				s.fwdPubToSub(cID, l.p, subs.qoss[i], true)
+				// subs.c.pubRX <- subPub{l.p, subs.qoss[i], true}
 			}
 		}
 
@@ -453,9 +527,16 @@ func (s *Server) addSubscriptions(subs *subList) {
 
 // TODO: remove subs from client state as well.
 func (s *Server) removeSubscriptions(subs *subList) {
+	cID := subs.c.session.clientId
+	cIDLen := uint16(len(cID))
+	err := s.state.RemoveSubs(append([]byte{byte(cIDLen >> 8), byte(cIDLen)}, []byte(cID)...), subs.topics)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 loop:
 	for _, t := range subs.topics {
-		tLevels := strings.Split(t, "/")
+		tLevels := strings.Split(string(t[2:]), "/")
 		l := s.subscriptions
 
 		var nl *topicLevel
@@ -466,19 +547,75 @@ loop:
 			}
 			l = nl.children
 		}
-		delete(nl.subscribers, subs.c)
+		delete(nl.subscribers, subs.c.session.clientId)
 	}
 }
 
-type subPub struct {
+/*type subPub struct {
 	p        *pub
 	maxQoS   uint8
-	retained bool
+	retained bool // true: this is pub is being sent out as result from client subscription
+}*/
+
+// Forward PUBLISH message to subscribed client, providing pub msg, subscription QoS level & if pub retained due to sub.
+func (s *Server) fwdPubToSub(cID string, p *pub, maxQoS uint8, retained bool) {
+	finalQoS := p.pubQoS
+	if maxQoS < p.pubQoS {
+		finalQoS = maxQoS
+	}
+
+	cIDLen := uint16(len(cID))
+	if finalQoS == 0 {
+		var pubP []byte
+		if c, ok := s.clients[cID]; ok {
+			// TODO: add to queue, but will get lost if session not active, and service stops before client reconnect
+			if retained {
+				// Make copy, otherwise we race with original packet being sent out without retain flag set.
+				pubP = make([]byte, len(p.pacs[0]))
+				copy(pubP, p.pacs[0])
+				pubP[0] |= 0x01
+			} else {
+				pubP = p.pacs[0]
+			}
+
+			c.q0.Add(pubP)
+		} else {
+			_, err := s.state.ForwardPub(append([]byte{byte(cIDLen >> 8), byte(cIDLen)}, []byte(cID)...), p.pacs[0], 0, 0)
+			if err != nil {
+				log.Error(err)
+				return
+			}
+		}
+
+	} else { // QoS 1 & 2
+		p.pacs[1][0] &= 0xF9
+		p.pacs[1][0] |= 1 << finalQoS
+		if retained {
+			p.pacs[1][0] |= 0x01
+		}
+
+		pubIDUsed, err := s.state.ForwardPub(append([]byte{byte(cIDLen >> 8), byte(cIDLen)}, []byte(cID)...), p.pacs[1], finalQoS, p.idLoc)
+		if err != nil {
+			log.Error(err)
+			return
+		}
+
+		if c, ok := s.clients[cID]; ok {
+			pubP := make([]byte, len(p.pacs[1]))
+			copy(pubP, p.pacs[1])
+
+			if finalQoS == 1 {
+				c.q1.Add(pubIDUsed, pubP)
+			} else {
+				c.q2.Add(pubIDUsed, pubP)
+			}
+		}
+	}
 }
 
 func (s *Server) forwardToSubscribers(tl *topicLevel, p *pub) {
-	for c, maxQoS := range tl.subscribers {
-		c.pubRX <- subPub{p, maxQoS, false}
+	for cID, maxQoS := range tl.subscribers {
+		s.fwdPubToSub(cID, p, maxQoS, false)
 	}
 }
 
@@ -535,7 +672,6 @@ func (s *Server) matchSubscriptions(p *pub) {
 
 		tr = nl.children
 	}
-
 	if p.empty {
 		nl.p = nil // delete existing retained message
 	} else {
@@ -549,3 +685,14 @@ type retainLevel struct {
 }
 
 type retainTree map[string]*retainLevel
+
+func size(n int) (s int) {
+	if n < 8 {
+		s = 4
+	} else if n < 16 {
+		s = 2
+	} else {
+		s = 1
+	}
+	return
+}

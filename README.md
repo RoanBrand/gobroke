@@ -63,3 +63,4 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
     * Client whitelist & blacklist options
     * Client topic subscription whitelist & blacklist options
     * Client topic publish rights whitelist & blacklist
+    * CRUD username and passwords while running

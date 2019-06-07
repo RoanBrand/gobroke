@@ -20,13 +20,13 @@ type session struct {
 	dead     int32
 	onlyOnce sync.Once
 
-	clientId        string
-	connectSent     bool
-	notFirstSession bool
-	connectFlags    byte
-	keepAlive       time.Duration
+	clientId        string // noneedtopersist - will have in mem probs
+	connectSent     bool // noneedtopersist
+	notFirstSession bool // existence of client entry in db?
+	connectFlags    byte // noneedtopersist
+	keepAlive       time.Duration // noneedtopersist
 
-	will     pub
+	will     pub // noneedtopersist
 	userName string
 	password []byte
 }
