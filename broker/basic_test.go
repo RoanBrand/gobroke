@@ -47,7 +47,7 @@ func TestRejoin(t *testing.T) {
 		}
 		sp2 = 1
 
-		err = c2.pubQ1()
+		err = c2.pubQ1([]byte("MSG"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -70,7 +70,7 @@ func TestRejoin(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		err = c2.pubQ1()
+		err = c2.pubQ1([]byte("MSG"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,6 +98,7 @@ func TestResendPendingQos1AtReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer s.Stop()
 
 	errPipe := make(chan error)
 	go func() {
@@ -123,13 +124,13 @@ func TestResendPendingQos1AtReconnect(t *testing.T) {
 	}
 
 	// 1 with puback
-	err = c2.pubQ1()
+	err = c2.pubQ1([]byte("msg1"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	pub := <-c1.pubs
-	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "MSG" || pub.dup {
+	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "msg1" || pub.dup {
 		t.Fatalf("got pub: %+v\n", pub)
 	}
 	if err := c1.sendPuback(pub.pID); err != nil {
@@ -137,21 +138,21 @@ func TestResendPendingQos1AtReconnect(t *testing.T) {
 	}
 
 	// 2,3 without puback
-	err = c2.pubQ1()
+	err = c2.pubQ1([]byte("msg2"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	pub = <-c1.pubs
-	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "MSG" || pub.dup {
+	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "msg2" || pub.dup {
 		t.Fatalf("got pub: %+v\n", pub)
 	}
 
-	err = c2.pubQ1()
+	err = c2.pubQ1([]byte("msg3"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	pub = <-c1.pubs
-	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "MSG" || pub.dup {
+	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "msg3" || pub.dup {
 		t.Fatalf("got pub: %+v\n", pub)
 	}
 
@@ -159,11 +160,11 @@ func TestResendPendingQos1AtReconnect(t *testing.T) {
 	time.Sleep(time.Microsecond * 200) // ensure c1 is closed before server sends 4 to it (might still get 4 as dup)
 
 	// 4, 5 no receive
-	err = c2.pubQ1()
+	err = c2.pubQ1([]byte("msg4"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = c2.pubQ1()
+	err = c2.pubQ1([]byte("msg5"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +176,7 @@ func TestResendPendingQos1AtReconnect(t *testing.T) {
 
 	// receive 2,3,4,5
 	pub = <-c1.pubs
-	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "MSG" || !pub.dup {
+	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "msg2" || !pub.dup {
 		t.Fatalf("got pub: %+v\n", pub)
 	}
 	if err := c1.sendPuback(pub.pID); err != nil {
@@ -183,7 +184,7 @@ func TestResendPendingQos1AtReconnect(t *testing.T) {
 	}
 
 	pub = <-c1.pubs
-	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "MSG" || !pub.dup {
+	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "msg3" || !pub.dup {
 		t.Fatalf("got pub: %+v\n", pub)
 	}
 	if err := c1.sendPuback(pub.pID); err != nil {
@@ -191,7 +192,7 @@ func TestResendPendingQos1AtReconnect(t *testing.T) {
 	}
 
 	pub = <-c1.pubs // dup might be true, is fine. (nature of qos1)
-	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "MSG" {
+	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "msg4" {
 		t.Fatalf("got pub: %+v\n", pub)
 	}
 	if err := c1.sendPuback(pub.pID); err != nil {
@@ -199,7 +200,7 @@ func TestResendPendingQos1AtReconnect(t *testing.T) {
 	}
 
 	pub = <-c1.pubs
-	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "MSG" || pub.dup {
+	if pub.qos != 1 || pub.topic != "t" || string(pub.msg) != "msg5" || pub.dup {
 		t.Fatalf("got pub: %+v\n", pub)
 	}
 	if err := c1.sendPuback(pub.pID); err != nil {
@@ -207,16 +208,29 @@ func TestResendPendingQos1AtReconnect(t *testing.T) {
 	}
 
 	s.Stop()
-	time.Sleep(time.Microsecond * 200)
+last:
+	for {
+		select {
+		case pub := <-c1.pubs:
+			t.Fatal("unknown pub received:", pub)
+		case <-time.After(time.Microsecond * 200):
+			break last
+		}
+	}
 
 	select {
 	case err := <-errPipe:
+		t.Fatal(err)
+	case err := <-c1.errs:
+		t.Fatal(err)
+	case err := <-c2.errs:
 		t.Fatal(err)
 	default:
 	}
 }
 
 type fakeClient struct {
+	errs      chan error
 	conn      net.Conn
 	pubId     uint16
 	pubs      chan pubInfo
@@ -256,7 +270,7 @@ func (c *fakeClient) reader() {
 		nRx, err := c.conn.Read(rx)
 		if err != nil {
 			if err.Error() != "EOF" && !strings.Contains(err.Error(), "use of closed") {
-				fmt.Println("test fake client reader error:", err)
+				c.errs <- err
 			}
 			return
 		}
@@ -324,7 +338,7 @@ func (c *fakeClient) reader() {
 						if _, present := c.q1Pubacks[pID]; present {
 							delete(c.q1Pubacks, pID)
 						} else {
-							fmt.Println("error received unknown PUBACK with ID", pID)
+							c.errs <- fmt.Errorf("error: received unknown PUBACK with ID %d", pID)
 						}
 						c.q1Lock.Unlock()
 					}
@@ -333,7 +347,7 @@ func (c *fakeClient) reader() {
 					if remainLen == 0 {
 						if controlAndFlags&0xF0 == broker.PUBLISH {
 							if err := c.handlePub(controlAndFlags, vh, payload); err != nil {
-								fmt.Println(err)
+								c.errs <- err
 								return
 							}
 						}
@@ -356,7 +370,7 @@ func (c *fakeClient) reader() {
 					switch controlAndFlags & 0xF0 {
 					case broker.PUBLISH:
 						if err := c.handlePub(controlAndFlags, vh, payload); err != nil {
-							fmt.Println(err)
+							c.errs <- err
 							return
 						}
 					case broker.SUBACK:
@@ -396,6 +410,7 @@ func doConnect(clientId byte, expectSp uint8) (*fakeClient, error) {
 	}
 
 	cl := fakeClient{
+		errs:      make(chan error),
 		conn:      conn,
 		pubs:      make(chan pubInfo, 1024),
 		connected: make(chan connackInfo),
@@ -436,14 +451,18 @@ func doConnect(clientId byte, expectSp uint8) (*fakeClient, error) {
 	return &cl, nil
 }
 
-func (c *fakeClient) pubQ1() error {
+func (c *fakeClient) pubQ1(msg []byte) error {
 	c.q1Lock.Lock()
 	c.pubId++
 	pID := c.pubId
 	c.q1Pubacks[pID] = struct{}{}
 	c.q1Lock.Unlock()
 
-	_, err := c.conn.Write([]byte{broker.PUBLISH | 2, 8, 0, 1, 't', uint8(pID >> 8), uint8(pID), 'M', 'S', 'G'})
+	_, err := c.conn.Write([]byte{broker.PUBLISH | 2, uint8(5 + len(msg)), 0, 1, 't', uint8(pID >> 8), uint8(pID)})
+	if err != nil {
+		return err
+	}
+	_, err = c.conn.Write(msg)
 	if err != nil {
 		return err
 	}

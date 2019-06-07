@@ -177,6 +177,7 @@ func (q *QoS12) StartDispatcher(write func([]byte) error, killed *int32) {
 		m.sent = time.Now()
 		go monitor(write, m, true)
 	}
+	q.toSend = nil
 	q.lock.Unlock()
 
 	defer q.lock.Unlock()
