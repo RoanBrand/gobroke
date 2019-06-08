@@ -3,15 +3,15 @@ package broker
 import (
 	"crypto/tls"
 	"errors"
-	"fmt"
 	"io/ioutil"
 	"net"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/RoanBrand/gobroke/config"
+	"github.com/RoanBrand/gobroke/internal/connections/websocket"
 	"github.com/RoanBrand/gobroke/internal/store"
-	"github.com/RoanBrand/gobroke/websocket"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -20,6 +20,10 @@ const (
 )
 
 type serverStore interface {
+	AddSession(cID []byte) error
+	SessionPresent(cID []byte) (bool, error)
+	RemoveSession(cID []byte) error
+
 	LoadSubs(iter func(topic, cID string, subQoS uint8)) error
 	AddSubs(cID []byte, topics [][]byte, QoSs []uint8) error
 	RemoveSubs(cID []byte, topics [][]byte) error
@@ -43,10 +47,13 @@ type Server struct {
 	subscribe   chan subList
 	unsubscribe chan subList
 	pubs        chan pub
+	stop        chan struct{}
 
 	tcpL, tlsL net.Listener
 
-	state serverStore
+	state    serverStore
+	wgActors sync.WaitGroup
+	stopOnce sync.Once
 }
 
 func NewServer(confPath string) (*Server, error) {
@@ -93,6 +100,7 @@ func NewServer(confPath string) (*Server, error) {
 		subscribe:     make(chan subList),
 		unsubscribe:   make(chan subList),
 		pubs:          make(chan pub, serverBuffer),
+		stop:          make(chan struct{}),
 
 		state: sstore,
 	}
@@ -111,7 +119,10 @@ func NewServer(confPath string) (*Server, error) {
 		return nil, err
 	}
 
-	websocket.SetDispatcher(s.startSession)
+	websocket.SetDispatcher(func(conn net.Conn) {
+		s.wgActors.Add(1)
+		go s.startSession(conn)
+	})
 	if err := s.setupWebsocket(); err != nil {
 		return nil, err
 	}
@@ -128,14 +139,11 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) Stop() {
-	log.Info("Shutting down MQTT server")
-	if s.tcpL != nil {
-		s.tcpL.Close()
-	}
-	if s.tlsL != nil {
-		s.tlsL.Close()
-	}
-	s.state.Close()
+	s.stopOnce.Do(func() {
+		log.Info("Shutting down MQTT server")
+		s.stop <- struct{}{}
+		<-s.stop
+	})
 }
 
 func (s *Server) run() {
@@ -166,6 +174,28 @@ func (s *Server) run() {
 			s.removeSubscriptions(&sl)
 		case p := <-s.pubs:
 			s.matchSubscriptions(&p)
+
+		case <-s.stop:
+			if s.tcpL != nil {
+				s.tcpL.Close()
+			}
+			if s.tlsL != nil {
+				s.tlsL.Close()
+			}
+			if s.config.WS.Enabled || s.config.WSS.Enabled {
+				websocket.Stop()
+			}
+
+			for _, c := range s.clients {
+				c.session.stop()
+			}
+			s.wgActors.Wait()
+
+			if err := s.state.Close(); err != nil {
+				log.Error(err)
+			}
+			s.stop <- struct{}{}
+			return
 		}
 	}
 }
@@ -247,13 +277,13 @@ func (s *Server) startDispatcher(l net.Listener) {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			if strings.Contains(err.Error(), "use of closed") {
-				err = nil
+			if !strings.Contains(err.Error(), "use of closed") {
+				s.errs <- err
 			}
-			s.errs <- err
 			return
 		}
 
+		s.wgActors.Add(1)
 		go s.startSession(conn)
 	}
 }
@@ -261,24 +291,28 @@ func (s *Server) startDispatcher(l net.Listener) {
 func (s *Server) addSession(newses *session) {
 	cID := newses.clientId
 	log.WithFields(log.Fields{
-		"client": cID,
+		"client":       cID,
+		"cleanSession": newses.persistent(),
 	}).Info("New session")
 
 	// [MQTT-3.1.2-4]
-	c, present := s.clients[cID]
-	if present {
+	c, ok := s.clients[cID]
+	if ok { // session present in memory
+		c.session.stop()
 		log.WithFields(log.Fields{
-			"client": cID,
+			"client":       cID,
+			"cleanSession": c.session.persistent(),
 		}).Debug("Old session present")
 
-		newses.notFirstSession = true
-		c.session.stop()
-
 		if newses.persistent() && c.session.persistent() {
+			newses.sendSP = true
 			log.WithFields(log.Fields{
 				"client": cID,
 			}).Debug("New session inheriting previous client state")
 		} else {
+			if err := s.state.RemoveSession(stringToMQTTUTF8(cID)); err != nil {
+				log.Error(err)
+			}
 			s.subscriptions.removeClient(c)
 			c.clear <- struct{}{}
 			<-c.clear
@@ -288,25 +322,51 @@ func (s *Server) addSession(newses *session) {
 		s.clients[cID] = newClient(newses)
 		c = s.clients[cID]
 
-		// load any queued messages from disk
-		cIDLen := uint16(len(cID))
-		err := s.state.LoadPubs(append([]byte{byte(cIDLen >> 8), byte(cIDLen)}, []byte(cID)...), func(p []byte, QoS uint8, pubID uint16) {
-			switch QoS {
-			case 0:
-				c.q0.Add(p)
-			case 1:
-				c.q1.Add(pubID, p)
-			case 2:
-				c.q2.Add(pubID, p)
-			}
-		})
+		cIDUTF := stringToMQTTUTF8(cID)
+		ok, err := s.state.SessionPresent(cIDUTF)
 		if err != nil {
 			log.Error(err)
+		}
+		if ok { // session present on disk
+			if newses.persistent() {
+				newses.sendSP = true
+				log.WithFields(log.Fields{
+					"client": cID,
+				}).Debug("New session inheriting previous client state")
+
+				// load any queued messages from disk
+				err := s.state.LoadPubs(cIDUTF, func(p []byte, QoS uint8, pubID uint16) {
+					switch QoS {
+					case 0:
+						c.q0.Add(p)
+					case 1:
+						c.q1.Add(pubID, p)
+					case 2:
+						c.q2.Add(pubID, p)
+					}
+				})
+				if err != nil {
+					log.Error(err)
+				}
+			} else {
+				if err = s.state.RemoveSession(stringToMQTTUTF8(cID)); err != nil {
+					log.Error(err)
+				}
+			}
+
+		} else {
+			if newses.persistent() {
+				if err = s.state.AddSession(cIDUTF); err != nil {
+					log.Error(err)
+				}
+			}
 		}
 	}
 
 	newses.client = c
-	newses.sendConnack(0)
+	if err := newses.sendConnack(0); err != nil {
+		log.Error(err)
+	}
 	newses.run()
 }
 
@@ -318,6 +378,10 @@ func (s *Server) removeClient(c *client) {
 	log.WithFields(log.Fields{
 		"client": c.session.clientId,
 	}).Debug("Deleting client session (CleanSession)")
+
+	if err := s.state.RemoveSession(stringToMQTTUTF8(c.session.clientId)); err != nil {
+		log.Error(err)
+	}
 
 	s.subscriptions.removeClient(c)
 	delete(s.clients, c.session.clientId)
@@ -421,7 +485,6 @@ func (s *Server) loadSubscriptions() error {
 			}
 		}
 
-		fmt.Println("add server sub for clientID", cID, "Topic:", topic)
 		sT.subscribers[cID] = subQoS
 		first, oldT = false, topic
 	})
@@ -430,10 +493,11 @@ func (s *Server) loadSubscriptions() error {
 // Add subscriptions for client. Also check for matching retained messages.
 func (s *Server) addSubscriptions(subs *subList) {
 	cID := subs.c.session.clientId
-	cIDLen := uint16(len(cID))
-	err := s.state.AddSubs(append([]byte{byte(cIDLen >> 8), byte(cIDLen)}, []byte(cID)...), subs.topics, subs.qoss)
-	if err != nil {
-		log.Fatal(err)
+	if subs.c.session.persistent() {
+		err := s.state.AddSubs(stringToMQTTUTF8(cID), subs.topics, subs.qoss)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	for i, t := range subs.topics {
@@ -528,8 +592,7 @@ func (s *Server) addSubscriptions(subs *subList) {
 // TODO: remove subs from client state as well.
 func (s *Server) removeSubscriptions(subs *subList) {
 	cID := subs.c.session.clientId
-	cIDLen := uint16(len(cID))
-	err := s.state.RemoveSubs(append([]byte{byte(cIDLen >> 8), byte(cIDLen)}, []byte(cID)...), subs.topics)
+	err := s.state.RemoveSubs(stringToMQTTUTF8(cID), subs.topics)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -547,7 +610,7 @@ loop:
 			}
 			l = nl.children
 		}
-		delete(nl.subscribers, subs.c.session.clientId)
+		delete(nl.subscribers, cID)
 	}
 }
 
@@ -564,7 +627,6 @@ func (s *Server) fwdPubToSub(cID string, p *pub, maxQoS uint8, retained bool) {
 		finalQoS = maxQoS
 	}
 
-	cIDLen := uint16(len(cID))
 	if finalQoS == 0 {
 		var pubP []byte
 		if c, ok := s.clients[cID]; ok {
@@ -580,10 +642,12 @@ func (s *Server) fwdPubToSub(cID string, p *pub, maxQoS uint8, retained bool) {
 
 			c.q0.Add(pubP)
 		} else {
-			_, err := s.state.ForwardPub(append([]byte{byte(cIDLen >> 8), byte(cIDLen)}, []byte(cID)...), p.pacs[0], 0, 0)
-			if err != nil {
-				log.Error(err)
-				return
+			if c.session.persistent() {
+				_, err := s.state.ForwardPub(stringToMQTTUTF8(cID), p.pacs[0], 0, 0)
+				if err != nil {
+					log.Error(err)
+					return
+				}
 			}
 		}
 
@@ -594,7 +658,7 @@ func (s *Server) fwdPubToSub(cID string, p *pub, maxQoS uint8, retained bool) {
 			p.pacs[1][0] |= 0x01
 		}
 
-		pubIDUsed, err := s.state.ForwardPub(append([]byte{byte(cIDLen >> 8), byte(cIDLen)}, []byte(cID)...), p.pacs[1], finalQoS, p.idLoc)
+		pubIDUsed, err := s.state.ForwardPub(stringToMQTTUTF8(cID), p.pacs[1], finalQoS, p.idLoc)
 		if err != nil {
 			log.Error(err)
 			return
@@ -695,4 +759,9 @@ func size(n int) (s int) {
 		s = 1
 	}
 	return
+}
+
+func stringToMQTTUTF8(s string) []byte {
+	l := len(s)
+	return append([]byte{byte(l >> 8), byte(l)}, []byte(s)...)
 }

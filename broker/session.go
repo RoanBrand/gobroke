@@ -20,11 +20,11 @@ type session struct {
 	dead     int32
 	onlyOnce sync.Once
 
-	clientId        string // noneedtopersist - will have in mem probs
-	connectSent     bool // noneedtopersist
-	notFirstSession bool // existence of client entry in db?
-	connectFlags    byte // noneedtopersist
-	keepAlive       time.Duration // noneedtopersist
+	clientId     string        // noneedtopersist - will have in mem probs
+	connectSent  bool          // noneedtopersist
+	sendSP       bool          // existence of client entry in db?
+	connectFlags byte          // noneedtopersist
+	keepAlive    time.Duration // noneedtopersist
 
 	will     pub // noneedtopersist
 	userName string
@@ -62,7 +62,7 @@ func (s *session) updateTimeout() {
 func (s *session) sendConnack(errCode uint8) error {
 	// [MQTT-3.2.2-1, 2-2, 2-3]
 	var sp byte = 0
-	if errCode == 0 && s.notFirstSession {
+	if errCode == 0 && s.sendSP {
 		sp = 1
 	}
 	p := []byte{CONNACK, 2, sp, errCode}
@@ -104,6 +104,10 @@ func (s *Server) startSession(conn net.Conn) {
 			s.pubs <- ns.will
 		}
 		ns.stop()
+		s.wgActors.Done()
+		if !ns.persistent() { // [MQTT-3.1.2-6]
+			s.unregister <- &ns
+		}
 	}()
 
 	rx := make([]byte, 1024)
@@ -113,9 +117,6 @@ func (s *Server) startSession(conn net.Conn) {
 			errStr := err.Error()
 			if errStr == "EOF" {
 				log.Println("client closed connection gracefully")
-				if !ns.persistent() { // [MQTT-3.1.2-6]
-					s.unregister <- &ns
-				}
 				return
 			}
 

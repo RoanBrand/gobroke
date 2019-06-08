@@ -36,8 +36,8 @@ func newClient(ses *session) *client {
 		tx:            bufio.NewWriter(ses.conn),
 		txFlush:       make(chan struct{}, 1),
 		//pubRX:         make(chan subPub, 1),
-		q2RxLookup:    make(map[uint16]struct{}, 2),
-		clear:         make(chan struct{}),
+		q2RxLookup: make(map[uint16]struct{}, 2),
+		clear:      make(chan struct{}),
 	}
 	c.q0.Init()
 	c.q1.Init()
@@ -52,7 +52,7 @@ func (c *client) run() {
 	for {
 		select {
 		/*case p := <-c.pubRX:
-			c.processPub(p)*/
+		c.processPub(p)*/
 		case <-c.clear:
 			c.clearState()
 			c.clear <- struct{}{}

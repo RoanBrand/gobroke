@@ -99,7 +99,7 @@ func (q *QoS2Part2) Add(id uint16, pubRel []byte, write func([]byte) error) {
 	if _, ok := q.lookup[id]; !ok {
 		pubR := &msg{done: make(chan struct{}), p: pubRel}
 		q.lookup[id] = q.l.PushBack(pubR)
-		go monitor(write, pubR, false)
+		go monitor(write, pubR, false, nil)
 	}
 	q.lock.Unlock()
 }
@@ -164,6 +164,9 @@ func (q *QoS0) StartDispatcher(write func([]byte) error, killed *int32) {
 // Worker routine for QoS 1&2 that sends new messages to client.
 // A new routine will also resend all messages still in queue as duplicates.
 func (q *QoS12) StartDispatcher(write func([]byte) error, killed *int32) {
+	stop := make(chan struct{})
+	defer close(stop)
+
 	q.lock.Lock()
 	for p := q.l.Front(); p != nil; p = p.Next() {
 		m := p.Value.(*msg)
@@ -171,13 +174,14 @@ func (q *QoS12) StartDispatcher(write func([]byte) error, killed *int32) {
 			setDUPFlag(m.p)
 		}
 		if err := write(m.p); err != nil {
+			q.lock.Unlock()
 			return
 		}
 
+		q.toSend = p.Next()
 		m.sent = time.Now()
-		go monitor(write, m, true)
+		go monitor(write, m, true, stop)
 	}
-	q.toSend = nil
 	q.lock.Unlock()
 
 	defer q.lock.Unlock()
@@ -202,7 +206,7 @@ func (q *QoS12) StartDispatcher(write func([]byte) error, killed *int32) {
 
 			q.toSend = p.Next()
 			m.sent = time.Now()
-			go monitor(write, m, true)
+			go monitor(write, m, true, stop)
 		}
 
 		q.lock.Unlock()
@@ -212,9 +216,10 @@ func (q *QoS12) StartDispatcher(write func([]byte) error, killed *int32) {
 // Monitor pending QoS 1&2 message, resend after timeout.
 // Exit if message has been acknowledged and removed from queue.
 // Set isPub to false if PUBREL, so not to set DUP on resend.
-func monitor(write func([]byte) error, m *msg, isPub bool) {
+func monitor(write func([]byte) error, m *msg, isPub bool, stop chan struct{}) {
 	for t := time.NewTimer(time.Second * 20); ; { // correct value or method?
 		select {
+		case <-stop:
 		case <-m.done:
 			if !t.Stop() {
 				<-t.C
@@ -238,9 +243,10 @@ func (q *QoS2Part2) ResendAll(write func([]byte) error) {
 	for pr := q.l.Front(); pr != nil; pr = pr.Next() {
 		m := pr.Value.(*msg)
 		if err := write(m.p); err != nil {
+			q.lock.Unlock()
 			return
 		}
-		go monitor(write, m, false)
+		go monitor(write, m, false, nil)
 	}
 	q.lock.Unlock()
 }

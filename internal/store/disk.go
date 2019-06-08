@@ -23,7 +23,62 @@ func NewDiskStore(dir string) (*diskStore, error) {
 }
 
 func (s *diskStore) Close() error {
+	if err := s.db.RunValueLogGC(0.5); err != nil {
+		if err != badger.ErrNoRewrite {
+			return err
+		}
+	}
 	return s.db.Close()
+}
+
+func (s *diskStore) AddSession(cID []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		key := make([]byte, 0, 1+len(cID))
+		key = append(key, []byte("c")...)
+		key = append(key, cID...)
+
+		return txn.Set(key, nil)
+	})
+}
+
+func (s *diskStore) SessionPresent(cID []byte) (bool, error) {
+	var present bool
+	err := s.db.View(func(txn *badger.Txn) error {
+		key := make([]byte, 0, 1+len(cID))
+		key = append(key, []byte("c")...)
+		key = append(key, cID...)
+
+		_, err := txn.Get(key)
+		if err != nil {
+			if err == badger.ErrKeyNotFound {
+				return nil // present = false
+			}
+			return err
+		}
+
+		present = true
+		return nil
+	})
+	return present, err
+}
+
+func (s *diskStore) RemoveSession(cID []byte) error {
+	return s.db.Update(func(txn *badger.Txn) error {
+		it := txn.NewIterator(badger.IteratorOptions{PrefetchValues: false})
+		defer it.Close()
+		key := make([]byte, 0, 1+len(cID))
+		key = append(key, []byte("c")...)
+		key = append(key, cID...)
+
+		// pubs, client subs, session present key, pubID
+		for it.Seek(key); it.ValidForPrefix(key); it.Next() {
+			if err := txn.Delete(it.Item().Key()); err != nil {
+				return err
+			}
+		}
+
+		return nil // TODO: remove server side subs
+	})
 }
 
 // Load all server subscriptions from store on startup.
@@ -157,36 +212,6 @@ func (s *diskStore) RemoveSubs(cID []byte, topics [][]byte) error {
 
 	return txn.Commit(nil)
 }
-
-// Get client's current publish ID to use for next message.
-/*func (s *diskStore) GetClientPubID(cID []byte) (uint16, error) {
-	var pubID uint16
-	err := s.db.View(func(txn *badger.Txn) error {
-		key := make([]byte, 0, 6+len(cID))
-		key = append(key, []byte("c")...)
-		key = append(key, cID...)
-		key = append(key, []byte("pubID")...)
-
-		item, err := txn.Get(key)
-		if err != nil {
-			if err != badger.ErrKeyNotFound {
-				return err
-			}
-			pubID = 0
-		} else {
-			val, err := item.Value()
-			if err != nil {
-				return err
-			}
-
-			pubID = binary.BigEndian.Uint16(val)
-		}
-
-		return nil
-	})
-
-	return pubID, err
-}*/
 
 // Load all stored PUBLISH messages destined for client when client connects to program for first time.
 func (s *diskStore) LoadPubs(cID []byte, iter func(p []byte, QoS uint8, pubID uint16)) error {

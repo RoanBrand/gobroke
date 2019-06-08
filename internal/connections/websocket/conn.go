@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -12,22 +13,45 @@ import (
 )
 
 var dispatch func(net.Conn)
+var srv, srvHTTPS http.Server
 
 func SetDispatcher(d func(net.Conn)) {
 	dispatch = d
 }
 
 func Setup(address string, checkOrigin bool, errs chan error) error {
+	srv.Addr = address
+	srv.Handler = http.HandlerFunc(handler(checkOrigin))
 	go func() {
-		errs <- http.ListenAndServe(address, http.HandlerFunc(handler(checkOrigin)))
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			errs <- err
+		}
 	}()
 	return nil
 }
 
 func SetupTLS(address, certFile, keyFile string, checkOrigin bool, errs chan error) error {
+	srvHTTPS.Addr = address
+	srvHTTPS.Handler = http.HandlerFunc(handler(checkOrigin))
 	go func() {
-		errs <- http.ListenAndServeTLS(address, certFile, keyFile, http.HandlerFunc(handler(checkOrigin)))
+		if err := srvHTTPS.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
+			errs <- err
+		}
 	}()
+	return nil
+}
+
+func Stop() error {
+	if srv.Addr != "" {
+		if err := srv.Shutdown(context.Background()); err != nil {
+			return err
+		}
+	}
+	if srvHTTPS.Addr != "" {
+		if err := srvHTTPS.Shutdown(context.Background()); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -54,7 +78,7 @@ func handler(checkOrigin bool) func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		go dispatch(&wsConn{Conn: conn})
+		dispatch(&wsConn{Conn: conn})
 	}
 }
 
