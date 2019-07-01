@@ -32,9 +32,14 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 	"log": {
 		"file": "path_to_log_file",        // log to file if specified
 		"level": "info"                    // error, warn, info, debug
+	},
+	"mqtt": {
+	    "retry_interval": 0                    // QoS 1&2 unacknowledged message resend timeout in ms
+	                                           // Set to 0 to disable. Will always resend once on new conn
 	}
 }
 ```
+* Default values for ports, loglevel, and mqtt protocol specific config shown
 * Most of config is optional, but one of `tcp`, `tls`, `ws` or `wss` must be specified and enabled
 ##### OS Service
 * Build then copy the binary and config file to a folder you want and run `gobroke -service install`
@@ -56,6 +61,8 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 * Config path can be overridden with `gobroke -c="path_to_config_file"`
 
 ## TODO
+* MQTT 5
+* Refactor to allow embeddable into another project with clean API.
 * Persistence to survive restart
 * $SYS Topic
 * Rate limiting

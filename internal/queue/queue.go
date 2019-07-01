@@ -7,10 +7,15 @@ import (
 	"time"
 )
 
+// Base message queue.
+type queue struct {
+	sync.Mutex
+	l *list.List
+}
+
 // PUBLISH messages
 type QoS0 struct {
-	lock sync.Mutex
-	l    *list.List
+	queue
 	trig *sync.Cond
 }
 
@@ -22,14 +27,14 @@ type QoS12 struct {
 
 // PUBREL messages
 type QoS2Part2 struct {
-	lock   sync.Mutex
-	l      *list.List
+	queue
 	lookup map[uint16]*list.Element
+	pubRel []byte
 }
 
 func (q *QoS0) Init() {
 	q.l = list.New()
-	q.trig = sync.NewCond(&q.lock)
+	q.trig = sync.NewCond(q)
 }
 
 func (q *QoS12) Init() {
@@ -37,97 +42,95 @@ func (q *QoS12) Init() {
 	q.lookup = make(map[uint16]*list.Element, 2)
 }
 
-func (q *QoS2Part2) Init() {
+func (q *QoS2Part2) Init(pubRel []byte) {
 	q.l = list.New()
 	q.lookup = make(map[uint16]*list.Element, 2)
+	q.pubRel = pubRel
 }
 
 func (q *QoS0) Reset() {
-	q.lock.Lock()
+	q.Lock()
 	q.l.Init()
-	q.lock.Unlock()
+	q.Unlock()
 }
 
 func (q *QoS12) Reset() {
-	q.lock.Lock()
-	for i, el := range q.lookup {
-		close(el.Value.(*msg).done)
+	q.Lock()
+	for i := range q.lookup {
 		delete(q.lookup, i)
 	}
 	q.l.Init()
-	q.lock.Unlock()
+	q.Unlock()
 }
 
 func (q *QoS2Part2) Reset() {
-	q.lock.Lock()
-	for i, el := range q.lookup {
-		close(el.Value.(*msg).done)
+	q.Lock()
+	for i := range q.lookup {
 		delete(q.lookup, i)
 	}
 	q.l.Init()
-	q.lock.Unlock()
+	q.Unlock()
 }
 
+// Queue element/item.
 type msg struct {
-	done chan struct{}
-	p    []byte
 	sent time.Time
+	p    []byte // PUBLISH
+	id   uint16 // PUBREL
 }
 
 // Store outbound QoS 0 PUBLISH messages for client.
 func (q *QoS0) Add(p []byte) {
-	q.lock.Lock()
+	q.Lock()
 	q.l.PushBack(p)
 	q.trig.Signal()
-	q.lock.Unlock()
+	q.Unlock()
 }
 
 // Store outbound QoS 1&2 PUBLISH messages.
 func (q *QoS12) Add(id uint16, p []byte) {
-	q.lock.Lock()
-	q.lookup[id] = q.l.PushBack(&msg{done: make(chan struct{}), p: p})
+	q.Lock()
+	q.lookup[id] = q.l.PushBack(&msg{p: p})
 	if q.toSend == nil {
 		q.toSend = q.lookup[id]
 	}
 	q.trig.Signal()
-	q.lock.Unlock()
+	q.Unlock()
 }
 
 // Store outbound QoS 2 PUBREL messages.
-func (q *QoS2Part2) Add(id uint16, pubRel []byte, write func([]byte) error) {
-	q.lock.Lock()
+func (q *QoS2Part2) Add(id uint16) {
+	q.Lock()
 	if _, ok := q.lookup[id]; !ok {
-		pubR := &msg{done: make(chan struct{}), p: pubRel}
+		pubR := &msg{sent: time.Now(), id: id}
 		q.lookup[id] = q.l.PushBack(pubR)
-		go monitor(write, pubR, false)
 	}
-	q.lock.Unlock()
+	q.Unlock()
 }
 
-// Remove messages that were successfully sent (QoS 0), or that got finalized (QoS 1&2).
-// Also signal message monitor to exit.
+// Remove finalized QoS 1&2 messages.
 func (q *QoS12) Remove(id uint16) bool {
-	q.lock.Lock()
+	q.Lock()
 	if qPub, ok := q.lookup[id]; ok {
-		close(q.l.Remove(qPub).(*msg).done)
+		q.l.Remove(qPub)
 		delete(q.lookup, id)
-		q.lock.Unlock()
+		q.Unlock()
 		return true
 	}
-	q.lock.Unlock()
+	q.Unlock()
 	return false
 }
 
-// Remove PUBREL messages that where finalized.
+// Remove PUBREL messages that were finalized.
 func (q *QoS2Part2) Remove(id uint16) bool {
-	q.lock.Lock()
+	q.Lock()
 	if qPub, ok := q.lookup[id]; ok {
-		close(q.l.Remove(qPub).(*msg).done)
+		q.l.Remove(qPub)
 		delete(q.lookup, id)
-		q.lock.Unlock()
+		q.Unlock()
 		return true
 	}
-	q.lock.Unlock()
+	q.Unlock()
 	return false
 }
 
@@ -139,9 +142,9 @@ func (q *QoS0) Signal() {
 // Worker routine for QoS 0 that sends new messages to client.
 // It will remove a message once it is has been successfully sent to the client.
 func (q *QoS0) StartDispatcher(write func([]byte) error, killed *int32) {
-	defer q.lock.Unlock()
+	defer q.Unlock()
 	for {
-		q.lock.Lock()
+		q.Lock()
 		if atomic.LoadInt32(killed) == 1 {
 			return
 		}
@@ -157,43 +160,24 @@ func (q *QoS0) StartDispatcher(write func([]byte) error, killed *int32) {
 			}
 			q.l.Remove(p)
 		}
-		q.lock.Unlock()
+		q.Unlock()
 	}
 }
 
 // Worker routine for QoS 1&2 that sends new messages to client.
-// A new routine will also resend all messages still in queue as duplicates.
 func (q *QoS12) StartDispatcher(write func([]byte) error, killed *int32) {
-	q.lock.Lock()
-	for p := q.l.Front(); p != nil; p = p.Next() {
-		m := p.Value.(*msg)
-		if !m.sent.IsZero() {
-			setDUPFlag(m.p)
-		}
-		if err := write(m.p); err != nil {
-			return
-		}
-
-		m.sent = time.Now()
-		go monitor(write, m, true)
-	}
-	q.toSend = nil
-	q.lock.Unlock()
-
-	defer q.lock.Unlock()
+	defer q.Unlock()
 	for {
-		q.lock.Lock()
+		q.Lock()
 		if atomic.LoadInt32(killed) == 1 {
 			return
 		}
-
 		if q.toSend == nil {
 			q.trig.Wait()
 		}
 		if atomic.LoadInt32(killed) == 1 {
 			return
 		}
-
 		for p := q.toSend; p != nil; p = p.Next() {
 			m := p.Value.(*msg)
 			if err := write(m.p); err != nil {
@@ -202,47 +186,107 @@ func (q *QoS12) StartDispatcher(write func([]byte) error, killed *int32) {
 
 			q.toSend = p.Next()
 			m.sent = time.Now()
-			go monitor(write, m, true)
 		}
-
-		q.lock.Unlock()
+		q.Unlock()
 	}
 }
 
-// Monitor pending QoS 1&2 message, resend after timeout.
-// Exit if message has been acknowledged and removed from queue.
-// Set isPub to false if PUBREL, so not to set DUP on resend.
-func monitor(write func([]byte) error, m *msg, isPub bool) {
-	for t := time.NewTimer(time.Second * 20); ; { // correct value or method?
+// Resend pending/unacknowledged QoS>0 messages after timeout.
+func (q *queue) monitorTimeouts(toMS uint64, killed chan struct{}, timedOut func(m *msg) error) {
+	timeout := time.Millisecond * time.Duration(toMS)
+	t := time.NewTimer(timeout)
+	defer func() {
+		if !t.Stop() {
+			<-t.C
+		}
+	}()
+
+	for {
 		select {
-		case <-m.done:
-			if !t.Stop() {
-				<-t.C
-			}
+		case <-killed:
 			return
-		case <-t.C:
-			if isPub {
-				setDUPFlag(m.p)
+		case now := <-t.C:
+			nextRun := timeout
+
+			q.Lock()
+			for p := q.l.Front(); p != nil; p = p.Next() {
+				m := p.Value.(*msg)
+				if m.sent.IsZero() {
+					break // if we encounter unsent, stop
+				}
+				if pending := now.Sub(m.sent); pending < timeout {
+					if candidate := timeout - pending; candidate < nextRun {
+						nextRun = candidate
+					}
+					continue
+				}
+
+				if err := timedOut(m); err != nil {
+					q.Unlock()
+					return
+				}
+
+				m.sent = now
 			}
-			if err := write(m.p); err != nil {
-				return
-			}
-			t.Reset(time.Second * 20)
+			q.Unlock()
+
+			t.Reset(nextRun)
 		}
 	}
 }
 
-// Resend all QoS 2 PUBRELs.
-func (q *QoS2Part2) ResendAll(write func([]byte) error) {
-	q.lock.Lock()
+// Resend pending/unacknowledged QoS 1,2 PUBLISHs after timeout.
+func (q *QoS12) MonitorTimeouts(toMS uint64, write func([]byte) error, killed chan struct{}) {
+	q.queue.monitorTimeouts(toMS, killed, func(m *msg) error {
+		setDUPFlag(m.p)
+		return write(m.p)
+	})
+}
+
+// Resend pending/unacknowledged QoS 2 PUBRELs after timeout.
+func (q *QoS2Part2) MonitorTimeouts(toMS uint64, write func([]byte) error, killed chan struct{}) {
+	q.queue.monitorTimeouts(toMS, killed, func(m *msg) error {
+		q.pubRel[2], q.pubRel[3] = byte(m.id>>8), byte(m.id)
+		return write(q.pubRel)
+	})
+}
+
+// Resend all pending QoS 1&2 PUBLISHs for new session.
+// Messages that have been sent before get sent as DUPs.
+func (q *QoS12) ResendAll(write func([]byte) error) error {
+	q.Lock()
+	for p := q.l.Front(); p != nil; p = p.Next() {
+		m := p.Value.(*msg)
+		if !m.sent.IsZero() {
+			setDUPFlag(m.p)
+		}
+		if err := write(m.p); err != nil {
+			q.Unlock()
+			return err
+		}
+
+		q.toSend = p.Next()
+		m.sent = time.Now()
+	}
+	q.Unlock()
+	return nil
+}
+
+// Resend all pending QoS 2 PUBRELs for new session.
+func (q *QoS2Part2) ResendAll(write func([]byte) error) error {
+	q.Lock()
 	for pr := q.l.Front(); pr != nil; pr = pr.Next() {
 		m := pr.Value.(*msg)
-		if err := write(m.p); err != nil {
-			return
+		q.pubRel[2], q.pubRel[3] = byte(m.id>>8), byte(m.id)
+		if err := write(q.pubRel); err != nil {
+			q.Unlock()
+			return err
 		}
-		go monitor(write, m, false)
+
+		m.sent = time.Now()
 	}
-	q.lock.Unlock()
+	q.Unlock()
+	return nil
 }
 
 // Indicate that outbound message has been sent to client in the past.

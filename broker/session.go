@@ -18,34 +18,67 @@ type session struct {
 	rxState uint8
 
 	dead     int32
+	dead2    chan struct{}
 	onlyOnce sync.Once
 
-	clientId        string
-	connectSent     bool
-	notFirstSession bool
-	connectFlags    byte
-	keepAlive       time.Duration
+	clientId     string
+	connectSent  bool
+	connectFlags byte
+	keepAlive    time.Duration
 
 	will     pub
 	userName string
 	password []byte
 }
 
-func (s *session) run() {
+func (s *session) run(retryInterval uint64) {
+	s.dead2 = make(chan struct{})
 	go s.startWriter()
+	c := s.client
 
-	go s.client.q0.StartDispatcher(s.writePacket, &s.dead)
-	go s.client.q1.StartDispatcher(s.writePacket, &s.dead)
-	s.client.q2Stage2.ResendAll(s.writePacket)
-	go s.client.q2.StartDispatcher(s.writePacket, &s.dead)
+	if err := c.q2Stage2.ResendAll(s.writePacket); err != nil {
+		log.WithFields(log.Fields{
+			"client": s.clientId,
+			"err":    err,
+		}).Error("Unable to resend all pending QoS2 PUBRELs")
+	}
+	if err := c.q2.ResendAll(s.writePacket); err != nil {
+		log.WithFields(log.Fields{
+			"client": s.clientId,
+			"err":    err,
+		}).Error("Unable to resend all pending QoS2 PUBLISHs")
+	}
+	if err := c.q1.ResendAll(s.writePacket); err != nil {
+		log.WithFields(log.Fields{
+			"client": s.clientId,
+			"err":    err,
+		}).Error("Unable to resend all pending QoS1 PUBLISHs")
+	}
+
+	go c.q0.StartDispatcher(s.writePacket, &s.dead)
+	go c.q1.StartDispatcher(s.writePacket, &s.dead)
+	go c.q2.StartDispatcher(s.writePacket, &s.dead)
+	if retryInterval > 0 {
+		go c.q2Stage2.MonitorTimeouts(retryInterval, s.writePacket, s.dead2)
+		go c.q1.MonitorTimeouts(retryInterval, s.writePacket, s.dead2)
+		go c.q2.MonitorTimeouts(retryInterval, s.writePacket, s.dead2)
+	}
 }
 
-func (s *session) stop() {
+func (s *session) stop() { // TODO: wait for all routines to exit before returning
 	s.onlyOnce.Do(func() {
-		s.conn.Close()
 		atomic.StoreInt32(&s.dead, 1)
+		close(s.dead2)
+		s.conn.Close()
 		if c := s.client; c != nil {
-			c.txFlush <- struct{}{}
+			c.txLock.Lock()
+			if len(c.txFlush) == 0 {
+				select {
+				case c.txFlush <- struct{}{}:
+				default:
+				}
+			}
+			c.txLock.Unlock()
 			c.q0.Signal()
 			c.q1.Signal()
 			c.q2.Signal()
@@ -59,13 +92,12 @@ func (s *session) updateTimeout() {
 	}
 }
 
-func (s *session) sendConnack(errCode uint8) error {
-	// [MQTT-3.2.2-1, 2-2, 2-3]
-	var sp byte = 0
-	if errCode == 0 && s.notFirstSession {
-		sp = 1
+// Send CONNACK with optional Session Present flag.
+func (s *session) sendConnack(errCode uint8, SP bool) error {
+	p := []byte{CONNACK, 2, 0, errCode}
+	if SP {
+		p[2] = 1
 	}
-	p := []byte{CONNACK, 2, sp, errCode}
 	_, err := s.conn.Write(p)
 	return err
 }
@@ -93,7 +125,7 @@ func (s *session) writePacket(p []byte) error {
 }
 
 func (s *Server) startSession(conn net.Conn) {
-	conn.SetReadDeadline(time.Now().Add(time.Second * 20)) // CONNECT packet timeout
+	conn.SetReadDeadline(time.Now().Add(time.Second * 10)) // CONNECT packet timeout
 	ns := session{conn: conn}
 	ns.packet.vh = make([]byte, 0, 512)
 	ns.packet.payload = make([]byte, 0, 512)
@@ -169,16 +201,14 @@ func (s *session) startWriter() {
 
 		if s.client.tx.Buffered() > 0 {
 			if err := s.client.tx.Flush(); err != nil {
+				s.client.txLock.Unlock()
 				if strings.Contains(err.Error(), "use of closed") {
-					s.client.txLock.Unlock()
 					return
 				}
-
 				log.WithFields(log.Fields{
 					"client": s.clientId,
 					"err":    err,
 				}).Error("TCP TX error")
-				s.client.txLock.Unlock()
 				return
 			}
 		}

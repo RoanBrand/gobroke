@@ -13,5 +13,8 @@
 		"enabled": false,
 		"address": ":80",
 		"check_origin": false
+	},
+	"mqtt": {
+		"retry_interval": 50000
 	}
 }

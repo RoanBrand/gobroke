@@ -232,17 +232,16 @@ func (s *Server) addSession(newses *session) {
 		"client": newses.clientId,
 	}).Info("New session")
 
-	// [MQTT-3.1.2-4]
-	c, present := s.clients[newses.clientId]
-	if present {
+	sendSP := false
+	c, ok := s.clients[newses.clientId] // [MQTT-3.1.2-4]
+	if ok {
+		c.session.stop()
 		log.WithFields(log.Fields{
 			"client": newses.clientId,
 		}).Debug("Old session present")
 
-		newses.notFirstSession = true
-		c.session.stop()
-
 		if newses.persistent() && c.session.persistent() {
+			sendSP = true
 			log.WithFields(log.Fields{
 				"client": newses.clientId,
 			}).Debug("New session inheriting previous client state")
@@ -258,8 +257,8 @@ func (s *Server) addSession(newses *session) {
 	}
 
 	newses.client = c
-	newses.sendConnack(0)
-	newses.run()
+	newses.sendConnack(0, sendSP) // [MQTT-3.2.2-1, 2-2, 2-3]
+	newses.run(s.config.MQTT.RetryInterval)
 }
 
 func (s *Server) removeClient(c *client) {
@@ -340,7 +339,7 @@ func (tt topicTree) removeClient(c *client) {
 	var unSub func(topicTree, topT)
 	unSub = func(sLevel topicTree, cLevel topT) {
 		for l, nCl := range cLevel {
-			if nSl, present := sLevel[l]; present {
+			if nSl, ok := sLevel[l]; ok {
 				delete(nSl.subscribers, c)
 				unSub(nSl.children, nCl.children)
 			}

@@ -30,6 +30,10 @@ type Config struct {
 		File  string `json:"file"`
 		Level string `json:"level"`
 	} `json:"log"`
+
+	MQTT struct {
+		RetryInterval uint64 `json:"retry_interval"`
+	} `json:"mqtt"`
 }
 
 type network struct {

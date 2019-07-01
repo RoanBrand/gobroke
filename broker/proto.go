@@ -144,10 +144,11 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			p.vhLen -= toRead
 
 			if p.vhLen == 0 {
+				c := ses.client
 				switch p.controlType {
 				case CONNECT:
 					if !bytes.Equal(connectPacket, p.vh[:7]) { // [MQTT-3.1.2-1]
-						ses.sendConnack(1) // [MQTT-3.1.2-2]
+						ses.sendConnack(1, false) // [MQTT-3.1.2-2]
 						return protocolViolation("unsupported client protocol. Must be MQTT v3.1.1")
 					}
 
@@ -163,20 +164,21 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						p.pID = binary.BigEndian.Uint16(p.vh[len(p.vh)-2:])
 					}
 				case PUBACK:
-					ses.client.qos1Done(binary.BigEndian.Uint16(p.vh))
+					c.qos1Done(binary.BigEndian.Uint16(p.vh))
 				case PUBREC:
-					pubRel := []byte{PUBREL | 0x02, 2, p.vh[0], p.vh[1]}
-					ses.client.qos2Part1Done(binary.BigEndian.Uint16(p.vh), pubRel)
-					if err := ses.writePacket(pubRel); err != nil {
+					c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBREL|0x02, 2, p.vh[0], p.vh[1]
+					c.qos2Part1Done(binary.BigEndian.Uint16(p.vh))
+					if err := ses.writePacket(c.acks); err != nil {
 						return err
 					}
 				case PUBREL: // [MQTT-4.3.3-2]
-					delete(ses.client.q2RxLookup, binary.BigEndian.Uint16(p.vh))
-					if err := ses.writePacket([]byte{PUBCOMP, 2, p.vh[0], p.vh[1]}); err != nil {
+					delete(c.q2RxLookup, binary.BigEndian.Uint16(p.vh))
+					c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBCOMP, 2, p.vh[0], p.vh[1]
+					if err := ses.writePacket(c.acks); err != nil {
 						return err
 					}
 				case PUBCOMP:
-					ses.client.qos2Part2Done(binary.BigEndian.Uint16(p.vh))
+					c.qos2Part2Done(binary.BigEndian.Uint16(p.vh))
 				}
 
 				p.payload = p.payload[:0]
@@ -251,7 +253,7 @@ func (s *Server) handleConnect(ses *session) error {
 		ses.clientId = string(p[2:offs])
 	} else {
 		if ses.persistent() { // [MQTT-3.1.3-7]
-			ses.sendConnack(2) // [MQTT-3.1.3-8]
+			ses.sendConnack(2, false) // [MQTT-3.1.3-8]
 			return protocolViolation("must have clientID when persistent session")
 		}
 
@@ -357,18 +359,21 @@ func (s *Server) handlePublish(ses *session) error {
 		log.WithFields(lf).Debug("Got PUBLISH packet")
 	}
 
+	c := ses.client
 	switch p.flags & 0x06 {
 	case 0x00: // QoS 0
 		s.pubs <- makePub(p.vh[:topicLen+2], p.payload, qos, retain)
 	case 0x02: // QoS 1
 		s.pubs <- makePub(p.vh[:topicLen+2], p.payload, qos, retain)
-		return ses.writePacket([]byte{PUBACK, 2, byte(p.pID >> 8), byte(p.pID)})
+		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBACK, 2, byte(p.pID>>8), byte(p.pID)
+		return ses.writePacket(c.acks)
 	case 0x04: // QoS 2 - [MQTT-4.3.3-2]
-		if _, present := ses.client.q2RxLookup[p.pID]; !present {
-			ses.client.q2RxLookup[p.pID] = struct{}{}
+		if _, ok := c.q2RxLookup[p.pID]; !ok {
+			c.q2RxLookup[p.pID] = struct{}{}
 			s.pubs <- makePub(p.vh[:topicLen+2], p.payload, qos, retain)
 		}
-		return ses.writePacket([]byte{PUBREC, 2, byte(p.pID >> 8), byte(p.pID)})
+		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBREC, 2, byte(p.pID>>8), byte(p.pID)
+		return ses.writePacket(c.acks)
 	}
 
 	return nil
@@ -427,10 +432,12 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 		"topics": topics,
 	}).Debug("Got UNSUBSCRIBE packet")
 
-	s.unsubscribe <- subList{ses.client, topics, nil}
+	c := ses.client
+	s.unsubscribe <- subList{c, topics, nil}
 
 	// [MQTT-3.10.4-4, 4-5, 4-6]
-	return ses.writePacket([]byte{UNSUBACK, 2, ses.packet.vh[0], ses.packet.vh[1]})
+	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = UNSUBACK, 2, ses.packet.vh[0], ses.packet.vh[1]
+	return ses.writePacket(c.acks)
 }
 
 func variableLengthEncode(packet []byte, l int) []byte {
