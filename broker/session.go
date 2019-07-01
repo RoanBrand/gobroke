@@ -20,6 +20,7 @@ type session struct {
 	dead     int32
 	dead2    chan struct{}
 	onlyOnce sync.Once
+	stopped  sync.WaitGroup
 
 	clientId     string
 	connectSent  bool
@@ -33,6 +34,7 @@ type session struct {
 
 func (s *session) run(retryInterval uint64) {
 	s.dead2 = make(chan struct{})
+	s.stopped.Add(1)
 	go s.startWriter()
 	c := s.client
 
@@ -55,17 +57,19 @@ func (s *session) run(retryInterval uint64) {
 		}).Error("Unable to resend all pending QoS1 PUBLISHs")
 	}
 
-	go c.q0.StartDispatcher(s.writePacket, &s.dead)
-	go c.q1.StartDispatcher(s.writePacket, &s.dead)
-	go c.q2.StartDispatcher(s.writePacket, &s.dead)
+	s.stopped.Add(3)
+	go c.q0.StartDispatcher(s.writePacket, &s.dead, &s.stopped)
+	go c.q1.StartDispatcher(s.writePacket, &s.dead, &s.stopped)
+	go c.q2.StartDispatcher(s.writePacket, &s.dead, &s.stopped)
 	if retryInterval > 0 {
-		go c.q2Stage2.MonitorTimeouts(retryInterval, s.writePacket, s.dead2)
-		go c.q1.MonitorTimeouts(retryInterval, s.writePacket, s.dead2)
-		go c.q2.MonitorTimeouts(retryInterval, s.writePacket, s.dead2)
+		s.stopped.Add(3)
+		go c.q2Stage2.MonitorTimeouts(retryInterval, s.writePacket, s.dead2, &s.stopped)
+		go c.q1.MonitorTimeouts(retryInterval, s.writePacket, s.dead2, &s.stopped)
+		go c.q2.MonitorTimeouts(retryInterval, s.writePacket, s.dead2, &s.stopped)
 	}
 }
 
-func (s *session) stop() { // TODO: wait for all routines to exit before returning
+func (s *session) stop() {
 	s.onlyOnce.Do(func() {
 		atomic.StoreInt32(&s.dead, 1)
 		close(s.dead2)
@@ -83,6 +87,7 @@ func (s *session) stop() { // TODO: wait for all routines to exit before returni
 			c.q1.Signal()
 			c.q2.Signal()
 		}
+		s.stopped.Wait()
 	})
 }
 
@@ -130,8 +135,10 @@ func (s *Server) startSession(conn net.Conn) {
 	ns.packet.vh = make([]byte, 0, 512)
 	ns.packet.payload = make([]byte, 0, 512)
 
+	ns.stopped.Add(1)
 	graceFullExit := false
 	defer func() {
+		ns.stopped.Done()
 		if !graceFullExit && ns.will.topic != "" && ns.connectSent {
 			s.pubs <- ns.will
 		}
@@ -192,6 +199,7 @@ func (s *Server) startSession(conn net.Conn) {
 }
 
 func (s *session) startWriter() {
+	defer s.stopped.Done()
 	for range s.client.txFlush {
 		s.client.txLock.Lock()
 		if atomic.LoadInt32(&s.dead) == 1 {

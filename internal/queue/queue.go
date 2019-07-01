@@ -141,8 +141,11 @@ func (q *QoS0) Signal() {
 
 // Worker routine for QoS 0 that sends new messages to client.
 // It will remove a message once it is has been successfully sent to the client.
-func (q *QoS0) StartDispatcher(write func([]byte) error, killed *int32) {
-	defer q.Unlock()
+func (q *QoS0) StartDispatcher(write func([]byte) error, killed *int32, wg *sync.WaitGroup) {
+	defer func() {
+		q.Unlock()
+		wg.Done()
+	}()
 	for {
 		q.Lock()
 		if atomic.LoadInt32(killed) == 1 {
@@ -165,8 +168,11 @@ func (q *QoS0) StartDispatcher(write func([]byte) error, killed *int32) {
 }
 
 // Worker routine for QoS 1&2 that sends new messages to client.
-func (q *QoS12) StartDispatcher(write func([]byte) error, killed *int32) {
-	defer q.Unlock()
+func (q *QoS12) StartDispatcher(write func([]byte) error, killed *int32, wg *sync.WaitGroup) {
+	defer func() {
+		q.Unlock()
+		wg.Done()
+	}()
 	for {
 		q.Lock()
 		if atomic.LoadInt32(killed) == 1 {
@@ -236,19 +242,21 @@ func (q *queue) monitorTimeouts(toMS uint64, killed chan struct{}, timedOut func
 }
 
 // Resend pending/unacknowledged QoS 1,2 PUBLISHs after timeout.
-func (q *QoS12) MonitorTimeouts(toMS uint64, write func([]byte) error, killed chan struct{}) {
+func (q *QoS12) MonitorTimeouts(toMS uint64, write func([]byte) error, killed chan struct{}, wg *sync.WaitGroup) {
 	q.queue.monitorTimeouts(toMS, killed, func(m *msg) error {
 		setDUPFlag(m.p)
 		return write(m.p)
 	})
+	wg.Done()
 }
 
 // Resend pending/unacknowledged QoS 2 PUBRELs after timeout.
-func (q *QoS2Part2) MonitorTimeouts(toMS uint64, write func([]byte) error, killed chan struct{}) {
+func (q *QoS2Part2) MonitorTimeouts(toMS uint64, write func([]byte) error, killed chan struct{}, wg *sync.WaitGroup) {
 	q.queue.monitorTimeouts(toMS, killed, func(m *msg) error {
 		q.pubRel[2], q.pubRel[3] = byte(m.id>>8), byte(m.id)
 		return write(q.pubRel)
 	})
+	wg.Done()
 }
 
 // Resend all pending QoS 1&2 PUBLISHs for new session.

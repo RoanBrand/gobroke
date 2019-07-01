@@ -618,4 +618,8 @@ func BenchmarkPubs(b *testing.B) {
 
 	b.StopTimer()
 	b.ReportAllocs()
+
+	c1.stop()
+	c2.stop()
+	s.Stop()
 }
