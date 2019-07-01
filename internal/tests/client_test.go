@@ -64,7 +64,7 @@ func (c *fakeClient) reader() {
 	rx := make([]byte, 4096)
 	var rxState, controlAndFlags uint8
 	var remainLen, lenMul, vhLen uint32
-	vh, payload := make([]byte, 0, 256), make([]byte, 0, 256)
+	vh, payload := make([]byte, 0, 512), make([]byte, 0, 512)
 	defer c.wg.Done()
 
 	for {
@@ -264,13 +264,13 @@ func newClient(errs chan error) *fakeClient {
 		pubrels:    make(chan uint16, 1024),
 		connected:  make(chan connackInfo),
 		subbed:     make(chan subackInfo),
-		q1Pubacks:  make(map[uint16]pubctrl, 8),
-		q2Pubrecs:  make(map[uint16]pubctrl, 8),
-		q2Pubcomps: make(map[uint16]pubctrl, 8),
+		q1Pubacks:  make(map[uint16]pubctrl),
+		q2Pubrecs:  make(map[uint16]pubctrl),
+		q2Pubcomps: make(map[uint16]pubctrl),
 		q2PubRelTx: make(map[uint16]struct{}),
 
 		acks:    make([]byte, 4),
-		workBuf: make([]byte, 0, 256),
+		workBuf: make([]byte, 0, 1024),
 		pIDs:    make(chan uint16, 65536),
 		tx:      &bufio.Writer{},
 		txFlush: make(chan struct{}, 1),

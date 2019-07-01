@@ -550,8 +550,8 @@ func BenchmarkPubs(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	limiter := make(chan struct{}, 62000) // needed so server does not discard msgs destined for c1
-	for i := 0; i < 62000; i++ {
+	limiter := make(chan struct{}, 63000) // needed so server does not discard msgs destined for c1
+	for i := 0; i < 63000; i++ {
 		limiter <- struct{}{}
 	}
 
@@ -578,10 +578,6 @@ func BenchmarkPubs(b *testing.B) {
 		go func() {
 			for i := 0; i < b.N; i++ {
 				pubrel := <-c1.pubrels
-				/*if uint16(i) != pubrel {
-					errs <- fmt.Errorf("expected pubrel id %d, got %d", i, pubrel)
-					return
-				}*/
 				if err = c1.sendPubcomp(pubrel); err != nil {
 					errs <- err
 					return
@@ -593,20 +589,69 @@ func BenchmarkPubs(b *testing.B) {
 	}
 
 	msg := make([]byte, 1)
+	f1, f2 := 1, 1
+
+	go func() {
+		for i := 0; i < b.N; i++ {
+			if qos > 0 {
+				<-limiter
+			}
+			if err := c2.pubMsg(msg, "t", qos, func(complete bool, pID uint16) {
+				switch qos {
+				case 1:
+					if !complete { // not puback
+						errs <- fmt.Errorf("expect puback, got something else pID %d", pID)
+						return
+					}
+					if f1 == b.N {
+						done <- struct{}{}
+					} else {
+						f1++
+					}
+				case 2:
+					if complete { // PUBCOMPS
+						if f2 == b.N && f1 == b.N {
+							done <- struct{}{}
+						} else {
+							f2++
+						}
+					} else { // PUBRECs
+						if err := c2.sendPubrel(pID); err != nil {
+							errs <- err
+							return
+						}
+						if f1 < b.N {
+							f1++
+						}
+					}
+				}
+			}); err != nil {
+				errs <- err
+				return
+			}
+		}
+		done <- struct{}{}
+	}()
+
+	time.Sleep(time.Millisecond) // give chance for everything to startup
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if qos > 0 {
-			<-limiter
-		}
-		if err := c2.pubMsg(msg, "t", qos, nil); err != nil {
-			b.Fatal(err)
-		}
-	}
 
 	select {
 	case err := <-errs:
 		b.Fatal(err)
 	case <-done:
+	}
+	select {
+	case err := <-errs:
+		b.Fatal(err)
+	case <-done:
+	}
+	if qos > 0 {
+		select {
+		case err := <-errs:
+			b.Fatal(err)
+		case <-done:
+		}
 	}
 	if qos == 2 {
 		select {
@@ -621,5 +666,4 @@ func BenchmarkPubs(b *testing.B) {
 
 	c1.stop()
 	c2.stop()
-	s.Stop()
 }
