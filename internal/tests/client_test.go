@@ -234,7 +234,7 @@ func (c *fakeClient) reader() {
 }
 
 func (c *fakeClient) handlePub(flags uint8, vh, payload []byte) error {
-	topicLen := binary.BigEndian.Uint16(vh)
+	topicLen := uint32(binary.BigEndian.Uint16(vh))
 	topic := string(vh[2 : 2+topicLen])
 	qos := (flags & 0x06) >> 1
 	var pID uint16

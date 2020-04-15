@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -17,16 +18,15 @@ func protocolViolation(msg string) error {
 }
 
 func (s *Server) parseStream(ses *session, rx []byte) error {
-	p := &ses.packet
-	l := uint32(len(rx))
+	p, l := &ses.packet, uint32(len(rx))
 	var i uint32
 
 	for i < l {
 		switch ses.rxState {
 		case controlAndFlags:
-			p.controlType = rx[i] & 0xF0
-			p.flags = rx[i] & 0x0F
-			if p.controlType < CONNECT || p.controlType > DISCONNECT {
+			p.controlType, p.flags = rx[i]&0xF0, rx[i]&0x0F
+
+			if p.controlType == 0 { // TODO: Handle AUTH rx for MQTTv4 (error)
 				return protocolViolation("invalid control packet")
 			}
 
@@ -41,13 +41,17 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				}
 			}
 
-			switch p.controlType {
+			switch p.controlType { // [MQTTv4-2.2.2-1, 2-2] [MQTTv5-2.1.3-1]
+			case CONNECT, PUBACK, PUBREC, PUBCOMP, PINGREQ, AUTH:
+				if p.flags != 0 {
+					return protocolViolation("malformed packet - Fixed header flags must be 0 (reserved)")
+				}
 			case PUBLISH:
 				if (p.flags&0x08 > 0) && (p.flags&0x06 == 0) { // [MQTT-3.3.1-2]
-					return protocolViolation("malformed PUBLISH")
+					return protocolViolation("malformed PUBLISH - DUP set for QoS0 Pub")
 				}
 				if p.flags&0x06 == 6 { // [MQTT-3.3.1-4]
-					return protocolViolation("malformed PUBLISH")
+					return protocolViolation("malformed PUBLISH - No QoS3")
 				}
 			case PUBREL:
 				if p.flags != 0x02 {
@@ -62,10 +66,13 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					return protocolViolation("malformed UNSUBSCRIBE")
 				}
 			case DISCONNECT:
+				if p.flags != 0 {
+					return protocolViolation("malformed DISCONNECT - Fixed header flags must be 0 (reserved)")
+				}
+
 				log.WithFields(log.Fields{
 					"client": ses.clientId,
 				}).Debug("Got DISCONNECT packet")
-
 				return errCleanExit
 			}
 
@@ -89,13 +96,13 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				case PUBACK, PUBREC, PUBREL, PUBCOMP:
 					p.vhLen = 2
 				case SUBSCRIBE:
-					if p.remainingLength < 5 { // [MQTT-3.8.3-3]
-						return protocolViolation("invalid SUBSCRIBE")
+					if p.remainingLength < 5 { // [MQTTv4-3.8.3-3]
+						return protocolViolation("invalid SUBSCRIBE no topic filter")
 					}
 					p.vhLen = 2
 				case UNSUBSCRIBE:
 					if p.remainingLength < 5 { // [MQTT-3.10.3-2]
-						return protocolViolation("invalid UNSUBSCRIBE")
+						return protocolViolation("invalid UNSUBSCRIBE no topic filter")
 					}
 					p.vhLen = 2
 				case PINGREQ:
@@ -160,6 +167,13 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					// [MQTT-3.1.2-24]
 					ses.keepAlive = time.Duration(binary.BigEndian.Uint16(p.vh[8:])) * time.Second * 3 / 2
 				case PUBLISH:
+					tLen := uint32(binary.BigEndian.Uint16(p.vh))
+					if tLen == 0 {
+						return protocolViolation("topic string empty")
+					}
+					if !checkUTF8(p.vh[2:2+tLen], true) { // [MQTTv4-3.3.2-1]
+						return protocolViolation("topic string not valid UTF-8")
+					}
 					if p.flags&0x06 > 0 { // Qos > 0
 						p.pID = binary.BigEndian.Uint16(p.vh[len(p.vh)-2:])
 					}
@@ -237,19 +251,22 @@ var unNamedClients int
 
 func (s *Server) handleConnect(ses *session) error {
 	p := ses.packet.payload
-	pLen := len(p)
+	pLen := uint32(len(p))
 
 	// Client ID
 	if pLen < 2 { // [MQTT-3.1.3-3]
 		return protocolViolation("malformed CONNECT payload no clientID")
 	}
-	clientIdLen := int(binary.BigEndian.Uint16(p))
+	clientIdLen := uint32(binary.BigEndian.Uint16(p))
 	offs := 2 + clientIdLen
 	if pLen < offs {
 		return protocolViolation("malformed CONNECT payload too short clientID")
 	}
 
 	if clientIdLen > 0 {
+		if !checkUTF8(p[2:offs], false) { // [MQTTv4-3.1.3-4]
+			return protocolViolation("malformed CONNECT clientID not valid UTF-8")
+		}
 		ses.clientId = string(p[2:offs])
 	} else {
 		if ses.persistent() { // [MQTT-3.1.3-7]
@@ -268,7 +285,11 @@ func (s *Server) handleConnect(ses *session) error {
 		}
 
 		wTopicUTFStart := offs
-		wTopicLen := int(binary.BigEndian.Uint16(p[offs:]))
+		wTopicLen := uint32(binary.BigEndian.Uint16(p[offs:]))
+		if wTopicLen == 0 {
+			return protocolViolation("malformed CONNECT will topic string empty")
+		}
+
 		offs += 2
 		if pLen < offs+wTopicLen {
 			return protocolViolation("malformed CONNECT payload too short will Topic")
@@ -280,7 +301,12 @@ func (s *Server) handleConnect(ses *session) error {
 			return protocolViolation("malformed CONNECT payload no will Message")
 		}
 
-		wMsgLen := int(binary.BigEndian.Uint16(p[offs:]))
+		wTopicUTF8 := p[wTopicUTFStart:wTopicUTFEnd]
+		if !checkUTF8(wTopicUTF8[2:], true) { // [MQTTv4-3.1.3-10]
+			return protocolViolation("malformed CONNECT will topic string not valid UTF-8")
+		}
+
+		wMsgLen := uint32(binary.BigEndian.Uint16(p[offs:]))
 		offs += 2
 		if pLen < offs+wMsgLen {
 			return protocolViolation("malformed CONNECT payload too short will Message")
@@ -291,7 +317,7 @@ func (s *Server) handleConnect(ses *session) error {
 			return protocolViolation("malformed CONNECT invalid will QoS level")
 		}
 
-		ses.will = makePub(p[wTopicUTFStart:wTopicUTFEnd], p[offs:offs+wMsgLen], wQoS, ses.connectFlags&0x20 > 0)
+		ses.will = makePub(wTopicUTF8, p[offs:offs+wMsgLen], wQoS, ses.connectFlags&0x20 > 0)
 		offs += wMsgLen
 
 	} else if ses.connectFlags&0x38 > 0 { // [MQTT-3.1.2-11, 2-13, 2-15]
@@ -303,20 +329,29 @@ func (s *Server) handleConnect(ses *session) error {
 		if pLen < 2+offs {
 			return protocolViolation("malformed CONNECT payload no username")
 		}
-		userLen := int(binary.BigEndian.Uint16(p[offs:]))
+		userLen := uint32(binary.BigEndian.Uint16(p[offs:]))
+		if userLen == 0 {
+			return protocolViolation("malformed CONNECT username empty")
+		}
+
 		offs += 2
 		if pLen < offs+userLen {
 			return protocolViolation("malformed CONNECT payload too short username")
 		}
 
-		ses.userName = string(p[offs : offs+userLen])
+		userName := p[offs : offs+userLen]
+		if !checkUTF8(userName, false) { // [MQTTv4-3.1.3-11]
+			return protocolViolation("malformed CONNECT username not valid UTF-8")
+		}
+
+		ses.userName = string(userName)
 		offs += userLen
 
 		if ses.connectFlags&0x40 > 0 {
 			if pLen < 2+offs {
 				return protocolViolation("malformed CONNECT payload no password")
 			}
-			passLen := int(binary.BigEndian.Uint16(p[offs:]))
+			passLen := uint32(binary.BigEndian.Uint16(p[offs:]))
 			offs += 2
 			if pLen < offs+passLen {
 				return protocolViolation("malformed CONNECT payload too short password")
@@ -324,14 +359,15 @@ func (s *Server) handleConnect(ses *session) error {
 
 			ses.password = make([]byte, passLen)
 			copy(ses.password, p[offs:offs+passLen])
-			// offs += wMsgLen
 		}
 
 	} else if ses.connectFlags&0x40 > 0 {
 		return protocolViolation("malformed CONNECT password without username")
 	}
 
-	ses.conn.SetReadDeadline(time.Time{}) // CONNECT packet timeout cancel
+	if err := ses.conn.SetReadDeadline(time.Time{}); err != nil { // CONNECT packet timeout cancel
+		return err
+	}
 	ses.connectSent = true
 	s.register <- ses
 	return nil
@@ -339,9 +375,8 @@ func (s *Server) handleConnect(ses *session) error {
 
 func (s *Server) handlePublish(ses *session) error {
 	p := &ses.packet
-	topicLen := int(binary.BigEndian.Uint16(p.vh))
-	qos := (p.flags & 0x06) >> 1
-	retain := p.flags&0x01 > 0
+	topicLen := uint32(binary.BigEndian.Uint16(p.vh))
+	qos, retain := (p.flags&0x06)>>1, p.flags&0x01 > 0
 
 	if log.IsLevelEnabled(log.DebugLevel) {
 		lf := log.Fields{
@@ -381,31 +416,39 @@ func (s *Server) handlePublish(ses *session) error {
 
 func (s *Server) handleSubscribe(ses *session) error {
 	p := ses.packet.payload
-	topics := make([]string, 0, 2)
-	qoss := make([]uint8, 0, 2)
-	i := 0
+	tFilters, qoss := make([]string, 0, 2), make([]uint8, 0, 2)
+	i, l := uint32(0), uint32(len(p))
 
-	for i < len(p) {
-		topicL := int(binary.BigEndian.Uint16(p[i:]))
-		topicEnd := i + 2 + topicL
-		topics = append(topics, string(p[i+2:topicEnd]))
-		if p[topicEnd]&0xFC != 0 { // [MQTT-3-8.3-4]
+	for i < l {
+		tFLen := uint32(binary.BigEndian.Uint16(p[i:]))
+		if tFLen == 0 {
+			return protocolViolation("malformed SUBSCRIBE topic filter string empty")
+		}
+
+		i += 2
+		tFEnd := i + tFLen
+		if p[tFEnd]&0xFC != 0 { // [MQTT-3-8.3-4]
 			return protocolViolation("malformed SUBSCRIBE")
 		}
 
-		qoss = append(qoss, p[topicEnd])
-		i += 3 + topicL
+		tF := p[i:tFEnd]
+		if !checkUTF8(tF, false) { // [MQTTv4-3.8.3-1]
+			return protocolViolation("malformed SUBSCRIBE topic filter string not valid UTF-8")
+		}
+
+		tFilters, qoss = append(tFilters, string(tF)), append(qoss, p[tFEnd])
+		i += 1 + tFLen
 	}
 
 	log.WithFields(log.Fields{
-		"client": ses.clientId,
-		"topics": topics,
+		"client":        ses.clientId,
+		"topic filters": tFilters,
 	}).Debug("Got SUBSCRIBE packet")
 
-	s.subscribe <- subList{ses.client, topics, qoss}
+	s.subscribe <- subList{ses.client, tFilters, qoss}
 
 	// [MQTT-3.8.4-1, 4-4, 4-5, 4-6]
-	tl := len(topics)
+	tl := len(tFilters)
 	subackP := make([]byte, 1, tl+7)
 	subackP[0] = SUBACK
 	subackP = variableLengthEncode(subackP, tl+2)
@@ -417,29 +460,40 @@ func (s *Server) handleSubscribe(ses *session) error {
 
 func (s *Server) handleUnsubscribe(ses *session) error {
 	p := ses.packet.payload
-	topics := make([]string, 0, 2)
-	i := 0
+	tFilters := make([]string, 0, 2)
+	i, l := uint32(0), uint32(len(p))
 
-	for i < len(p) {
-		topicL := int(binary.BigEndian.Uint16(p[i:]))
-		topicEnd := i + 2 + topicL
-		topics = append(topics, string(p[i+2:topicEnd]))
-		i += 2 + topicEnd
+	for i < l {
+		tFLen := uint32(binary.BigEndian.Uint16(p[i:]))
+		if tFLen == 0 {
+			return protocolViolation("malformed UNSUBSCRIBE topic filter string empty")
+		}
+
+		i += 2
+		tFEnd := i + tFLen
+		tF := p[i:tFEnd]
+		if !checkUTF8(tF, false) { // [MQTTv4-3.10.3-1]
+			return protocolViolation("malformed UNSUBSCRIBE topic filter string not valid UTF-8")
+		}
+
+		tFilters = append(tFilters, string(tF))
+		i += tFEnd
 	}
 
 	log.WithFields(log.Fields{
-		"client": ses.clientId,
-		"topics": topics,
+		"client":        ses.clientId,
+		"topic filters": tFilters,
 	}).Debug("Got UNSUBSCRIBE packet")
 
 	c := ses.client
-	s.unsubscribe <- subList{c, topics, nil}
+	s.unsubscribe <- subList{c, tFilters, nil}
 
 	// [MQTT-3.10.4-4, 4-5, 4-6]
 	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = UNSUBACK, 2, ses.packet.vh[0], ses.packet.vh[1]
 	return ses.writePacket(c.acks)
 }
 
+// [MQTTv5-1.5.5-1]
 func variableLengthEncode(packet []byte, l int) []byte {
 	for {
 		eb := l % 128
@@ -449,8 +503,29 @@ func variableLengthEncode(packet []byte, l int) []byte {
 		}
 		packet = append(packet, byte(eb))
 		if l <= 0 {
-			break
+			return packet
 		}
 	}
-	return packet
+}
+
+// [MQTTv4-1.5.3-1] [MQTTv4-1.5.3-3] [MQTTv5-1.5.4-1] [MQTTv5-1.5.4-3]
+func checkUTF8(str []byte, checkWildCards bool) bool {
+	for i := 0; i < len(str); {
+		if str[i] == 0 { // [MQTTv4-1.5.3-2] [MQTTv5-1.5.4-2]
+			return false
+		}
+
+		if checkWildCards && (str[i] == '+' || str[i] == '#') { // [MQTTv4-3.3.2-2]
+			return false
+		} else if str[i]&0x80 == 0 {
+			i++
+		} else {
+			r, size := utf8.DecodeRune(str[i:])
+			if r == utf8.RuneError {
+				return size != 1
+			}
+			i += size
+		}
+	}
+	return true
 }

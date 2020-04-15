@@ -16,6 +16,7 @@ const (
 	PINGREQ     = 12 << 4
 	PINGRESP    = 13 << 4
 	DISCONNECT  = 14 << 4
+	AUTH        = 15 << 4
 )
 
 var connectPacket = []byte{0, 4, 'M', 'Q', 'T', 'T', 4}

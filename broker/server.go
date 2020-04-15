@@ -296,11 +296,9 @@ func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
 	} else {
 		p.pacs = make([][]byte, 2)
 	}
-	p.pubQoS = qos
-	tLen := len(topicUTF8)
-	pLen := len(payload)
-	p.retain = retain
-	p.empty = pLen == 0
+
+	tLen, pLen := len(topicUTF8), len(payload)
+	p.retain, p.pubQoS, p.empty = retain, qos, pLen == 0
 
 	// QoS 0
 	p.pacs[0] = make([]byte, 1, 5+tLen+pLen) // ctrl 1 + remainLen 4max + topic(with2bytelen) + msgLen
