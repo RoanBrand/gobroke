@@ -15,7 +15,7 @@ func TestQoS0(t *testing.T) {
 	logrus.SetLevel(logrus.ErrorLevel)
 
 	errs := make(chan error, 1)
-	s, err := broker.NewServer("config.json")
+	s, err := broker.NewServer("../../config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestQoS1(t *testing.T) {
 	logrus.SetLevel(logrus.ErrorLevel)
 
 	errs := make(chan error, 1)
-	s, err := broker.NewServer("config.json")
+	s, err := broker.NewServer("../../config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestQoS2(t *testing.T) {
 	logrus.SetLevel(logrus.ErrorLevel)
 
 	errs := make(chan error, 1)
-	s, err := broker.NewServer("config.json")
+	s, err := broker.NewServer("../../config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +524,7 @@ func BenchmarkPubs(b *testing.B) {
 	var qos uint8 = 2 // Change QoS level here
 
 	errs := make(chan error, 1)
-	s, err := broker.NewServer("config.json")
+	s, err := broker.NewServer("../../config.json")
 	if err != nil {
 		b.Fatal(err)
 	}

@@ -52,6 +52,9 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 * The address must contain host/ip only and no URL. Currently it is served over all URLs
 * `check_origin` ensures that Origin request header is present and that the origin host is equal to request Host header before accepting a connection
 
+## Test
+* `make test`
+
 ## Run
 * `go run run.go -c="config.json"`
 
@@ -61,12 +64,13 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 * Config path can be overridden with `gobroke -c="path_to_config_file"`
 
 ## TODO
-* MQTT 5
+* Parallel tests running on single instance, covering entire spec.
 * Refactor to allow embeddable into another project with clean API.
-* Persistence to survive restart
+* Persistence (levelDB?)
+* MQTT 5
 * $SYS Topic
-* Rate limiting
 * User Auth system with:
     * Client whitelist & blacklist options
     * Client topic subscription whitelist & blacklist options
     * Client topic publish rights whitelist & blacklist
+* Rate limiting

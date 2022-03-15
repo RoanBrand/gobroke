@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/RoanBrand/gobroke/broker"
 )
@@ -284,7 +285,7 @@ func newClient(errs chan error) *fakeClient {
 
 func (c *fakeClient) connect(clientId byte, cleanSes bool, expectSp uint8) error {
 	var err error
-	c.conn, err = net.Dial("tcp", "localhost:1883")
+	c.conn, err = net.DialTimeout("tcp", "localhost:1883", time.Second)
 	if err != nil {
 		return err
 	}
