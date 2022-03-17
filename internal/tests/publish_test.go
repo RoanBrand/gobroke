@@ -8,14 +8,17 @@ import (
 	"time"
 
 	"github.com/RoanBrand/gobroke/broker"
+
+	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
 
-func TestQoS0(t *testing.T) {
-	logrus.SetLevel(logrus.ErrorLevel)
+func testQoS0(t *testing.T) {
+	t.Parallel()
+	//logrus.SetLevel(logrus.ErrorLevel)
 
 	errs := make(chan error, 1)
-	s, err := broker.NewServer("../../config.json")
+	/*s, err := broker.NewServer("../../config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,29 +27,30 @@ func TestQoS0(t *testing.T) {
 		if err := s.Start(); err != nil {
 			errs <- err
 		}
-	}()
+	}()*/
 
-	c1, err := dial('1', true, 0, errs)
+	c1, err := dial("", true, 0, errs)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = c1.sub("t", 0)
+	topic := uuid.NewString()
+	err = c1.sub(topic, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	c2, err := dial('2', true, 0, errs)
+	c2, err := dial("", true, 0, errs)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	count := 100000
+	count := 256
 	done := make(chan struct{})
 	go func() {
 		for i := 0; i < count; i++ {
 			pub := <-c1.pubs
-			if pub.qos != 0 || pub.topic != "t" {
+			if pub.qos != 0 || pub.topic != topic {
 				errs <- fmt.Errorf("%+v", pub)
 				return
 			}
@@ -62,7 +66,7 @@ func TestQoS0(t *testing.T) {
 	msg := make([]byte, 4)
 	for i := 0; i < count; i++ {
 		binary.BigEndian.PutUint32(msg, uint32(i))
-		if err := c2.pubMsg(msg, "t", 0, nil); err != nil {
+		if err := c2.pubMsg(msg, topic, 0, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -74,11 +78,12 @@ func TestQoS0(t *testing.T) {
 	}
 }
 
-func TestQoS1(t *testing.T) {
-	logrus.SetLevel(logrus.ErrorLevel)
+func testQoS1(t *testing.T) {
+	t.Parallel()
+	//logrus.SetLevel(logrus.ErrorLevel)
 
 	errs := make(chan error, 1)
-	s, err := broker.NewServer("../../config.json")
+	/*s, err := broker.NewServer("../../config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,30 +92,31 @@ func TestQoS1(t *testing.T) {
 		if err := s.Start(); err != nil {
 			errs <- err
 		}
-	}()
+	}()*/
 
-	c1, err := dial('1', false, 0, errs)
+	c1, err := dial("", false, 0, errs)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = c1.sub("t", 1)
+	topic := uuid.NewString()
+	err = c1.sub(topic, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	c2, err := dial('2', false, 0, errs)
+	c2, err := dial("", false, 0, errs)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	count := 65500
+	count := 256
 	done := make(chan struct{})
 	msg := []byte{1, 2, 3, 4, 5, 6, 7, 8}
 
 	f1 := 1
 	for i := 1; i <= count; i++ {
-		if err := c2.pubMsg(msg, "t", 1, func(complete bool, pID uint16) {
+		if err := c2.pubMsg(msg, topic, 1, func(complete bool, pID uint16) {
 			if !complete { // not puback
 				errs <- fmt.Errorf("expect puback, got something else pID %d", pID)
 				return
@@ -135,7 +141,7 @@ func TestQoS1(t *testing.T) {
 		case err := <-errs:
 			t.Fatal(err)
 		case pub := <-c1.pubs:
-			if pub.qos != 1 || pub.topic != "t" || !bytes.Equal(pub.msg, msg) || pub.dup || pub.pID != uint16(i) {
+			if pub.qos != 1 || pub.topic != topic || !bytes.Equal(pub.msg, msg) || pub.dup || pub.pID != uint16(i) {
 				t.Fatal(pub)
 			}
 			if i%2 == 0 {
@@ -158,7 +164,7 @@ func TestQoS1(t *testing.T) {
 	if err = c1.stop(); err != nil {
 		t.Fatal(err)
 	}
-	c1, err = dial('1', false, 1, errs)
+	c1, err = dial(c1.ClientID, false, 1, errs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +174,7 @@ func TestQoS1(t *testing.T) {
 		case err := <-errs:
 			t.Fatal(err)
 		case pub := <-c1.pubs:
-			if pub.qos != 1 || pub.topic != "t" || !bytes.Equal(pub.msg, msg) || !pub.dup || pub.pID != uint16(i) {
+			if pub.qos != 1 || pub.topic != topic || !bytes.Equal(pub.msg, msg) || !pub.dup || pub.pID != uint16(i) {
 				t.Fatal(i, pub)
 			}
 
@@ -189,7 +195,7 @@ func TestQoS1(t *testing.T) {
 	if err = c1.stop(); err != nil {
 		t.Fatal(err)
 	}
-	c1, err = dial('1', false, 1, errs)
+	c1, err = dial(c1.ClientID, false, 1, errs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,11 +209,12 @@ func TestQoS1(t *testing.T) {
 	}
 }
 
-func TestQoS2(t *testing.T) {
-	logrus.SetLevel(logrus.ErrorLevel)
+func testQoS2(t *testing.T) {
+	t.Parallel()
+	//logrus.SetLevel(logrus.ErrorLevel)
 
 	errs := make(chan error, 1)
-	s, err := broker.NewServer("../../config.json")
+	/*s, err := broker.NewServer("../../config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,33 +223,34 @@ func TestQoS2(t *testing.T) {
 		if err := s.Start(); err != nil {
 			errs <- err
 		}
-	}()
+	}()*/
 
-	c1 := newClient(errs)
-	err = c1.connect('1', false, 0)
+	c1 := newClient("", errs)
+	err := c1.connect(false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	err = c1.sub("t", 2)
+	topic := uuid.NewString()
+	err = c1.sub(topic, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	c2 := newClient(errs)
-	err = c2.connect('2', false, 0)
+	c2 := newClient("", errs)
+	err = c2.connect(false, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	count := 65500
+	count := 256
 	done := make(chan struct{})
 	msg := []byte{1, 2, 3, 4, 5, 6, 7, 8}
 
 	// C2 Pub all, and only complete even.
 	f1, f2 := 1, 2
 	for i := 1; i <= count; i++ {
-		if err := c2.pubMsg(msg, "t", 2, func(complete bool, pID uint16) {
+		if err := c2.pubMsg(msg, topic, 2, func(complete bool, pID uint16) {
 			if complete { // PUBCOMPS
 				if int(pID) != f2 { // only expect even PUBCOMPs
 					errs <- fmt.Errorf("expecting pubcomp for pID %d, got for %d", f2, pID)
@@ -282,7 +290,7 @@ func TestQoS2(t *testing.T) {
 	// C2 Re-pub odd with DUP, and expect their PUBRECs.
 	f1 = 1
 	for i := 1; i <= count; i += 2 {
-		if err := c2.pubMsgRaw(msg, "t", 2, uint16(i), true, func(complete bool, pID uint16) {
+		if err := c2.pubMsgRaw(msg, topic, 2, uint16(i), true, func(complete bool, pID uint16) {
 			if complete {
 				errs <- fmt.Errorf("expecting pubrec for pID %d, got pubcomp", pID)
 				return
@@ -315,7 +323,7 @@ func TestQoS2(t *testing.T) {
 		case err := <-errs:
 			t.Fatal(err)
 		case pub := <-c1.pubs:
-			if pub.qos != 2 || pub.topic != "t" || !bytes.Equal(pub.msg, msg) || pub.dup || int(pub.pID) != i {
+			if pub.qos != 2 || pub.topic != topic || !bytes.Equal(pub.msg, msg) || pub.dup || int(pub.pID) != i {
 				t.Fatal(pub)
 			}
 			if i%2 == 0 {
@@ -366,11 +374,11 @@ func TestQoS2(t *testing.T) {
 	if err = c2.stop(); err != nil {
 		t.Fatal(err)
 	}
-	err = c1.connect('1', false, 1)
+	err = c1.connect(false, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = c2.connect('2', false, 1)
+	err = c2.connect(false, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +386,7 @@ func TestQoS2(t *testing.T) {
 	// C2 Re-pub odd with DUP again, and complete.
 	f1, f2 = 1, 1
 	for i := 1; i <= count; i += 2 {
-		if err := c2.pubMsgRaw(msg, "t", 2, uint16(i), true, func(complete bool, pID uint16) {
+		if err := c2.pubMsgRaw(msg, topic, 2, uint16(i), true, func(complete bool, pID uint16) {
 			if complete { // PUBCOMPS
 				if int(pID) != f2 { // only expect even PUBCOMPs
 					errs <- fmt.Errorf("expecting pubcomp for pID %d, got for %d", f2, pID)
@@ -429,7 +437,7 @@ func TestQoS2(t *testing.T) {
 		case err := <-errs:
 			t.Fatal(err)
 		case pub := <-c1.pubs:
-			if pub.qos != 2 || pub.topic != "t" || !bytes.Equal(pub.msg, msg) || !pub.dup || int(pub.pID) != i {
+			if pub.qos != 2 || pub.topic != topic || !bytes.Equal(pub.msg, msg) || !pub.dup || int(pub.pID) != i {
 				t.Fatal(i, pub)
 			}
 
@@ -468,7 +476,7 @@ func TestQoS2(t *testing.T) {
 	if err = c1.stop(); err != nil {
 		t.Fatal(err)
 	}
-	err = c1.connect('1', false, 1)
+	err = c1.connect(false, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +510,7 @@ func TestQoS2(t *testing.T) {
 	if err = c1.stop(); err != nil {
 		t.Fatal(err)
 	}
-	err = c1.connect('1', false, 1)
+	err = c1.connect(false, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,7 +543,7 @@ func BenchmarkPubs(b *testing.B) {
 		}
 	}()
 
-	c1, err := dial('1', true, 0, errs)
+	c1, err := dial("", true, 0, errs)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -545,7 +553,7 @@ func BenchmarkPubs(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	c2, err := dial('2', true, 0, errs)
+	c2, err := dial("", true, 0, errs)
 	if err != nil {
 		b.Fatal(err)
 	}

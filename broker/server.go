@@ -3,7 +3,6 @@ package broker
 import (
 	"crypto/tls"
 	"errors"
-	"io/ioutil"
 	"net"
 	"os"
 	"strings"
@@ -159,22 +158,12 @@ func (s *Server) setupTLS() error {
 		return nil
 	}
 
-	cf, err := os.Open(s.config.TLS.Cert)
+	cert, err := os.ReadFile(s.config.TLS.Cert)
 	if err != nil {
 		return err
 	}
-	defer cf.Close()
-	kf, err := os.Open(s.config.TLS.Key)
-	if err != nil {
-		return err
-	}
-	defer kf.Close()
 
-	cert, err := ioutil.ReadAll(cf)
-	if err != nil {
-		return err
-	}
-	key, err := ioutil.ReadAll(kf)
+	key, err := os.ReadFile(s.config.TLS.Key)
 	if err != nil {
 		return err
 	}

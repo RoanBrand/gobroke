@@ -3,6 +3,7 @@ package tests_test
 import (
 	"bufio"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"strings"
@@ -11,9 +12,13 @@ import (
 	"time"
 
 	"github.com/RoanBrand/gobroke/broker"
+
+	"github.com/google/uuid"
 )
 
 type fakeClient struct {
+	ClientID string
+
 	errs      chan error
 	conn      net.Conn
 	pubs      chan pubInfo
@@ -35,8 +40,9 @@ type fakeClient struct {
 	txFlush chan struct{}
 	txLock  sync.Mutex
 
-	wg   sync.WaitGroup
-	dead int32
+	wg     sync.WaitGroup
+	toKill int32
+	dead   chan struct{}
 }
 
 type pubInfo struct {
@@ -74,6 +80,7 @@ func (c *fakeClient) reader() {
 			if err.Error() != "EOF" && !strings.Contains(err.Error(), "use of closed") {
 				c.errs <- err
 			}
+			close(c.dead)
 			return
 		}
 
@@ -253,13 +260,19 @@ func (c *fakeClient) handlePub(flags uint8, vh, payload []byte) error {
 	return nil
 }
 
-func dial(clientId byte, cleanSes bool, expectSp uint8, errs chan error) (*fakeClient, error) {
-	c := newClient(errs)
-	return c, c.connect(clientId, cleanSes, expectSp)
+func dial(clientId string, cleanSes bool, expectSp uint8, errs chan error) (*fakeClient, error) {
+	c := newClient(clientId, errs)
+	return c, c.connect(cleanSes, expectSp)
 }
 
-func newClient(errs chan error) *fakeClient {
+func newClient(clientId string, errs chan error) *fakeClient {
+	if len(clientId) > 64 {
+		errs <- fmt.Errorf("clientId too long (%d)", len(clientId))
+		return nil
+	}
+
 	c := fakeClient{
+		ClientID:   clientId,
 		errs:       errs,
 		pubs:       make(chan pubInfo, 1024),
 		pubrels:    make(chan uint16, 1024),
@@ -280,29 +293,60 @@ func newClient(errs chan error) *fakeClient {
 		c.pIDs <- uint16(i)
 	}
 
+	if len(clientId) == 0 {
+		c.ClientID = generateNewClientID()
+	}
+
 	return &c
 }
 
-func (c *fakeClient) connect(clientId byte, cleanSes bool, expectSp uint8) error {
+func generateNewClientID() string {
+	uuid := [16]byte(uuid.New())
+	return hex.EncodeToString(uuid[:])
+}
+
+func (c *fakeClient) dialOnly() error {
 	var err error
 	c.conn, err = net.DialTimeout("tcp", "localhost:1883", time.Second)
 	if err != nil {
 		return err
 	}
 
+	atomic.StoreInt32(&c.toKill, 0)
+	c.dead = make(chan struct{})
 	c.tx.Reset(c.conn)
 	c.wg.Add(2)
-	atomic.StoreInt32(&c.dead, 0)
 	go c.startWriter()
 	go c.reader()
 
+	return nil
+}
+
+func (c *fakeClient) sendConnectPacket(cleanSession bool) error {
 	var cf byte
-	if cleanSes {
+	if cleanSession {
 		cf |= 0x02
 	}
 
-	err = c.writePacket([]byte{broker.CONNECT, 13, 0, 4, 'M', 'Q', 'T', 'T', 4, cf, 0, 0, 0, 1, clientId})
-	if err != nil {
+	l := byte(len(c.ClientID))
+	connectPack := []byte{broker.CONNECT, 12 + l, 0, 4, 'M', 'Q', 'T', 'T', 4, cf, 0, 0, 0, l}
+	connectPack = append(connectPack, []byte(c.ClientID)...)
+	return c.writePacket(connectPack)
+}
+
+func (c *fakeClient) sendUnknownProtocolNameConnectPacket() error {
+	l := byte(len(c.ClientID))
+	connectPack := []byte{broker.CONNECT, 12 + l, 0, 4, 'F', 'A', 'K', 'E', 4, 0, 0, 0, 0, l}
+	connectPack = append(connectPack, []byte(c.ClientID)...)
+	return c.writePacket(connectPack)
+}
+
+func (c *fakeClient) connect(cleanSes bool, expectSp uint8) error {
+	if err := c.dialOnly(); err != nil {
+		return err
+	}
+
+	if err := c.sendConnectPacket(cleanSes); err != nil {
 		return err
 	}
 
@@ -323,7 +367,7 @@ func (c *fakeClient) stop() error {
 	if err := c.sendDisconnect(); err != nil {
 		return err
 	}
-	atomic.StoreInt32(&c.dead, 1)
+	atomic.StoreInt32(&c.toKill, 1)
 	if err := c.conn.Close(); err != nil {
 		return err
 	}
@@ -462,7 +506,7 @@ func (c *fakeClient) startWriter() {
 	defer c.wg.Done()
 	for range c.txFlush {
 		c.txLock.Lock()
-		if atomic.LoadInt32(&c.dead) == 1 {
+		if atomic.LoadInt32(&c.toKill) == 1 {
 			c.txLock.Unlock()
 			return
 		}

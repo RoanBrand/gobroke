@@ -91,6 +91,9 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			if rx[i]&128 == 0 {
 				switch p.controlType {
 				case CONNECT:
+					if p.remainingLength < 12 { // [MQTT-3.1.3-3]
+						return protocolViolation("invalid CONNECT - absent clientId in payload")
+					}
 					p.vhLen = 10
 				case PUBLISH:
 					p.vhLen = 0 // determined later
@@ -254,10 +257,6 @@ func (s *Server) handleConnect(ses *session) error {
 	pLen := uint32(len(p))
 
 	// Client ID
-	if pLen < 2 { // [MQTT-3.1.3-3]
-		return protocolViolation("malformed CONNECT payload no clientID")
-	}
-
 	clientIdLen := uint32(binary.BigEndian.Uint16(p))
 	offs := 2 + clientIdLen
 	if pLen < offs {
@@ -355,11 +354,15 @@ func (s *Server) handleConnect(ses *session) error {
 
 			ses.password = make([]byte, passLen)
 			copy(ses.password, p[offs:offs+passLen])
-			// offs += wMsgLen
+			offs += passLen
 		}
 
 	} else if ses.connectFlags&0x40 > 0 {
 		return protocolViolation("malformed CONNECT password without username")
+	}
+
+	if offs != pLen {
+		return protocolViolation("malformed CONNECT: unexpected extra payload fields (Will Topic, Will Message, User Name or Password)")
 	}
 
 	if err := ses.conn.SetReadDeadline(time.Time{}); err != nil { // CONNECT packet timeout cancel

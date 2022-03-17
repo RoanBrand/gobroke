@@ -4,32 +4,34 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RoanBrand/gobroke/broker"
-	"github.com/sirupsen/logrus"
+	"github.com/google/uuid"
 )
 
-func TestRejoin(t *testing.T) {
-	logrus.SetLevel(logrus.ErrorLevel)
+func testRejoin(t *testing.T) {
+	t.Parallel()
+	/*logrus.SetLevel(logrus.ErrorLevel)
 	s, err := broker.NewServer("../../config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Stop()
+	defer s.Stop()*/
 
 	errs := make(chan error, 1)
-	go func() {
+	/*go func() {
 		if err := s.Start(); err != nil {
 			errs <- err
 		}
-	}()
+	}()*/
 
 	var oldC1, oldC2 *fakeClient
+	c1Name, c2Name := generateNewClientID(), generateNewClientID()
 	var sp1, sp2 uint8
 	var c1PubReadId uint16 = 1
 	gotPubID := false
+	topic := uuid.NewString()
 
 	for i := 0; i < 128; i++ {
-		c1, err := dial('1', false, sp1, errs)
+		c1, err := dial(c1Name, false, sp1, errs)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -40,12 +42,12 @@ func TestRejoin(t *testing.T) {
 		}
 
 		sp1 = 1
-		err = c1.sub("t", 1)
+		err = c1.sub(topic, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		c2, err := dial('2', false, sp2, errs)
+		c2, err := dial(c2Name, false, sp2, errs)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -56,7 +58,7 @@ func TestRejoin(t *testing.T) {
 			oldC2 = nil
 		}
 
-		err = c2.pubMsg([]byte("MSG"), "t", 1, nil)
+		err = c2.pubMsg([]byte("MSG"), topic, 1, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -66,7 +68,7 @@ func TestRejoin(t *testing.T) {
 			c1PubReadId = pub.pID
 			gotPubID = true
 		}
-		if pub.topic != "t" || pub.dup || pub.qos != 1 || pub.pID != c1PubReadId || string(pub.msg) != "MSG" {
+		if pub.topic != topic || pub.dup || pub.qos != 1 || pub.pID != c1PubReadId || string(pub.msg) != "MSG" {
 			t.Fatal("got pub:", pub, "pID must be:", c1PubReadId, "")
 		}
 
@@ -81,7 +83,7 @@ func TestRejoin(t *testing.T) {
 			oldC1 = c1
 		}
 
-		c1, err = dial('1', false, sp1, errs)
+		c1, err = dial(c1Name, false, sp1, errs)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -90,13 +92,13 @@ func TestRejoin(t *testing.T) {
 			oldC1 = nil
 		}
 
-		err = c2.pubMsg([]byte("MSG"), "t", 1, nil)
+		err = c2.pubMsg([]byte("MSG"), topic, 1, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
 
 		pub = <-c1.pubs
-		if pub.topic != "t" || pub.dup || pub.qos != 1 || pub.pID != c1PubReadId || string(pub.msg) != "MSG" {
+		if pub.topic != topic || pub.dup || pub.qos != 1 || pub.pID != c1PubReadId || string(pub.msg) != "MSG" {
 			t.Fatal("got pub:", pub, "pID must be:", c1PubReadId, "")
 		}
 
@@ -119,11 +121,11 @@ func TestRejoin(t *testing.T) {
 	}
 
 	// session present must be 0 if cleansession is set.
-	_, err = dial('1', true, 0, errs)
+	_, err := dial(c1Name, true, 0, errs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = dial('2', true, 0, errs)
+	_, err = dial(c2Name, true, 0, errs)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -33,7 +33,6 @@ type session struct {
 }
 
 func (s *session) run(retryInterval uint64) {
-	s.dead2 = make(chan struct{})
 	s.stopped.Add(1)
 	go s.startWriter()
 	c := s.client
@@ -131,7 +130,7 @@ func (s *session) writePacket(p []byte) error {
 
 func (s *Server) startSession(conn net.Conn) {
 	conn.SetReadDeadline(time.Now().Add(time.Second * 10)) // CONNECT packet timeout
-	ns := session{conn: conn}
+	ns := session{conn: conn, dead2: make(chan struct{})}
 	ns.packet.vh = make([]byte, 0, 512)
 	ns.packet.payload = make([]byte, 0, 512)
 

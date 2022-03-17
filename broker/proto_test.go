@@ -3,6 +3,8 @@ package broker
 import "testing"
 
 func TestVariableLengthEncoding(t *testing.T) {
+	t.Parallel()
+
 	l := 0
 	ve := variableLengthEncode([]byte{}, l)
 	if len(ve) != 1 || ve[0] != 0 {
@@ -89,6 +91,8 @@ func TestVariableLengthEncoding(t *testing.T) {
 }
 
 func TestUTF8(t *testing.T) {
+	t.Parallel()
+
 	// U+0000 invalid
 	if checkUTF8([]byte{0x00}, false) {
 		t.Fatal(0)
