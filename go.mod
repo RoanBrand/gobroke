@@ -1,11 +1,11 @@
 module github.com/RoanBrand/gobroke
 
 require (
-	github.com/google/uuid v1.3.0 // indirect
-	github.com/gorilla/websocket v1.4.0
-	github.com/kardianos/osext v0.0.0-20190222173326-2bc1f35cddc0 // indirect
-	github.com/kardianos/service v0.0.0-20181115005516-4c239ee84e7b
-	github.com/sirupsen/logrus v1.3.0
+	github.com/google/uuid v1.3.0
+	github.com/gorilla/websocket v1.5.0
+	github.com/kardianos/service v1.2.1
+	github.com/sirupsen/logrus v1.8.1
+	golang.org/x/sys v0.0.0-20220317061510-51cd9980dadf // indirect
 )
 
 go 1.13

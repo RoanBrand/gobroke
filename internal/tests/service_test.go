@@ -1,7 +1,6 @@
 package tests_test
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/RoanBrand/gobroke/broker"
@@ -18,7 +17,6 @@ func TestService(t *testing.T) {
 
 	t.Cleanup(func() {
 		s.Stop()
-		fmt.Println("test cleanup happened")
 	})
 
 	errs := make(chan error, 1)
