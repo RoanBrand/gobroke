@@ -138,10 +138,15 @@ func (s *Server) startSession(conn net.Conn) {
 	graceFullExit := false
 	defer func() {
 		ns.stopped.Done()
-		if !graceFullExit && ns.will.topic != "" && ns.connectSent {
-			s.pubs <- ns.will
-		}
 		ns.stop()
+		if ns.connectSent {
+			if !ns.persistent() { // [MQTT-3.1.2-6]
+				s.removeSession(&ns)
+			}
+			if !graceFullExit && len(ns.will.topic) != 0 {
+				s.pubs <- ns.will
+			}
+		}
 	}()
 
 	rx := make([]byte, 1024)
@@ -150,10 +155,6 @@ func (s *Server) startSession(conn net.Conn) {
 		if err != nil {
 			errStr := err.Error()
 			if errStr == "EOF" {
-				log.Println("client closed connection gracefully")
-				if !ns.persistent() { // [MQTT-3.1.2-6]
-					s.unregister <- &ns
-				}
 				return
 			}
 

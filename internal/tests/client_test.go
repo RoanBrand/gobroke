@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -19,12 +20,13 @@ import (
 type fakeClient struct {
 	ClientID string
 
-	errs      chan error
-	conn      net.Conn
-	pubs      chan pubInfo
-	pubrels   chan uint16
-	connected chan connackInfo
-	subbed    chan subackInfo
+	errs          chan error
+	conn          net.Conn
+	pubs          chan pubInfo
+	pubrels       chan uint16
+	connacks      chan connackInfo
+	subbed        chan subackInfo
+	pingResponses chan struct{}
 
 	qL        sync.Mutex
 	q1Pubacks map[uint16]pubctrl // pubs to server
@@ -34,7 +36,7 @@ type fakeClient struct {
 	q2PubRelTx map[uint16]struct{}
 
 	acks, workBuf []byte
-	pIDs          chan uint16
+	pIDs          chan uint16 // for publish and subscribe packets
 
 	tx      *bufio.Writer
 	txFlush chan struct{}
@@ -98,6 +100,8 @@ func (c *fakeClient) reader() {
 					switch controlAndFlags & 0xF0 {
 					case broker.PUBLISH:
 						vhLen = 0
+					case broker.PINGRESP:
+						c.pingResponses <- struct{}{}
 					default: // CONNACK, PUBACK, SUBACK
 						vhLen = 2
 					}
@@ -140,7 +144,7 @@ func (c *fakeClient) reader() {
 				if vhLen == 0 {
 					switch controlAndFlags & 0xF0 {
 					case broker.CONNACK:
-						c.connected <- connackInfo{vh[0], vh[1]}
+						c.connacks <- connackInfo{vh[0], vh[1]}
 					case broker.PUBACK:
 						pID := binary.BigEndian.Uint16(vh)
 						c.qL.Lock()
@@ -272,16 +276,17 @@ func newClient(clientId string, errs chan error) *fakeClient {
 	}
 
 	c := fakeClient{
-		ClientID:   clientId,
-		errs:       errs,
-		pubs:       make(chan pubInfo, 1024),
-		pubrels:    make(chan uint16, 1024),
-		connected:  make(chan connackInfo),
-		subbed:     make(chan subackInfo),
-		q1Pubacks:  make(map[uint16]pubctrl),
-		q2Pubrecs:  make(map[uint16]pubctrl),
-		q2Pubcomps: make(map[uint16]pubctrl),
-		q2PubRelTx: make(map[uint16]struct{}),
+		ClientID:      clientId,
+		errs:          errs,
+		pubs:          make(chan pubInfo, 1024),
+		pubrels:       make(chan uint16, 1024),
+		connacks:      make(chan connackInfo),
+		subbed:        make(chan subackInfo),
+		pingResponses: make(chan struct{}),
+		q1Pubacks:     make(map[uint16]pubctrl),
+		q2Pubrecs:     make(map[uint16]pubctrl),
+		q2Pubcomps:    make(map[uint16]pubctrl),
+		q2PubRelTx:    make(map[uint16]struct{}),
 
 		acks:    make([]byte, 4),
 		workBuf: make([]byte, 0, 1024),
@@ -351,13 +356,17 @@ func (c *fakeClient) connect(cleanSes bool, expectSp uint8) error {
 	}
 
 	select {
-	case cInfo := <-c.connected:
+	case cInfo := <-c.connacks:
 		if cInfo.sp != expectSp {
 			return fmt.Errorf("error connecting to server. SessionP: %v, must be: %v", cInfo.sp, expectSp)
 		}
 		if cInfo.code != 0 {
 			return fmt.Errorf("error connecting to server. Return code: %d, must be: %d", cInfo.code, 0)
 		}
+	case <-c.dead:
+		return errors.New("client stopped. server most likely closed connection")
+	case <-time.After(time.Second):
+		return fmt.Errorf("timed out waiting for CONNACK")
 	}
 
 	return nil
@@ -413,7 +422,12 @@ func (c *fakeClient) pubMsgRaw(msg []byte, topic string, qos uint8, pubID uint16
 	c.workBuf = append(c.workBuf, []byte(topic)...)
 	if qos > 0 {
 		c.workBuf = append(c.workBuf, uint8(pubID>>8), uint8(pubID))
-		c.workBuf[0] |= 1 << qos
+		if qos == 3 {
+			c.workBuf[0] |= 0b00000110
+		} else {
+			c.workBuf[0] |= 1 << qos
+		}
+
 	}
 	if dup {
 		c.workBuf[0] |= 0x08
@@ -426,7 +440,7 @@ func (c *fakeClient) pubMsgRaw(msg []byte, topic string, qos uint8, pubID uint16
 }
 
 func (c *fakeClient) sub(topic string, qos uint8) error {
-	var pId uint16 = 5
+	pId := <-c.pIDs
 	b := []byte{broker.SUBSCRIBE | 2, 5 + uint8(len(topic)), uint8(pId >> 8), uint8(pId), 0, uint8(len(topic))}
 	b = append(b, []byte(topic)...)
 	b = append(b, qos)
@@ -443,8 +457,10 @@ func (c *fakeClient) sub(topic string, qos uint8) error {
 		if sInfo.qos != qos {
 			return fmt.Errorf("suback error. QoS is: %v Must be: %v", sInfo.qos, 1)
 		}
-		//case <-time.After(time.Second):
-		//	return fmt.Errorf("suback timeout")
+	case <-c.dead:
+		return errors.New("client stopped. server most likely closed connection")
+	case <-time.After(time.Second):
+		return fmt.Errorf("timed out waiting for SUBACK")
 	}
 
 	return nil
@@ -476,6 +492,11 @@ func (c *fakeClient) sendPubcomp(pID uint16) error {
 	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = broker.PUBCOMP, 2, uint8(pID>>8), uint8(pID)
 	err := c.writePacket(c.acks)
 	return err
+}
+
+func (c *fakeClient) sendPing() error {
+	c.acks[0], c.acks[1] = broker.PINGREQ, 0
+	return c.writePacket(c.acks[:2])
 }
 
 func (c *fakeClient) sendDisconnect() error {

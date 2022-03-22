@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -173,8 +174,8 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				case PUBLISH:
 					tLen := uint32(binary.BigEndian.Uint16(p.vh))
 					if tLen > 0 {
-						if !checkUTF8(p.vh[2:2+tLen], true) { // [MQTT-3.3.2-1]
-							return protocolViolation("topic string not valid UTF-8")
+						if err := checkUTF8(p.vh[2:2+tLen], true); err != nil { // [MQTT-3.3.2-1]
+							return protocolViolation("Invalid Publish Topic string: " + err.Error())
 						}
 					}
 					if p.flags&0x06 > 0 { // Qos > 0
@@ -264,8 +265,8 @@ func (s *Server) handleConnect(ses *session) error {
 	}
 
 	if clientIdLen > 0 {
-		if !checkUTF8(p[2:offs], false) { // [MQTT-3.1.3-4]
-			return protocolViolation("malformed CONNECT clientID not valid UTF-8")
+		if err := checkUTF8(p[2:offs], false); err != nil { // [MQTT-3.1.3-4]
+			return protocolViolation("malformed CONNECT clientID: " + err.Error())
 		}
 
 		ses.clientId = string(p[2:offs])
@@ -299,8 +300,8 @@ func (s *Server) handleConnect(ses *session) error {
 		}
 
 		wTopicUTF8 := p[wTopicUTFStart:wTopicUTFEnd]
-		if !checkUTF8(wTopicUTF8[2:], true) { // [MQTT-3.1.3-10]
-			return protocolViolation("malformed CONNECT will topic string not valid UTF-8")
+		if err := checkUTF8(wTopicUTF8[2:], true); err != nil { // [MQTT-3.1.3-10]
+			return protocolViolation("malformed CONNECT Will Topic string: " + err.Error())
 		}
 
 		wMsgLen := uint32(binary.BigEndian.Uint16(p[offs:]))
@@ -334,8 +335,8 @@ func (s *Server) handleConnect(ses *session) error {
 		}
 
 		userName := p[offs : offs+userLen]
-		if !checkUTF8(userName, false) { // [MQTT-3.1.3-11]
-			return protocolViolation("malformed CONNECT username not valid UTF-8")
+		if err := checkUTF8(userName, false); err != nil { // [MQTT-3.1.3-11]
+			return protocolViolation("malformed CONNECT User Name: " + err.Error())
 		}
 
 		ses.userName = string(userName)
@@ -369,8 +370,9 @@ func (s *Server) handleConnect(ses *session) error {
 		return err
 	}
 
+	ses.sendConnack(0, s.addSession(ses)) // [MQTT-3.2.2-1, 2-2, 2-3]
 	ses.connectSent = true
-	s.register <- ses
+	ses.run(s.config.MQTT.RetryInterval)
 	return nil
 }
 
@@ -417,7 +419,7 @@ func (s *Server) handlePublish(ses *session) error {
 
 func (s *Server) handleSubscribe(ses *session) error {
 	p := ses.packet.payload
-	topics, qoss := make([]string, 0, 2), make([]uint8, 0, 2)
+	topics, qoss := make([][]string, 0, 2), make([]uint8, 0, 2)
 	i := uint32(0)
 
 	for i < uint32(len(p)) {
@@ -429,11 +431,11 @@ func (s *Server) handleSubscribe(ses *session) error {
 		}
 
 		topic := p[i:topicEnd]
-		if !checkUTF8(topic, false) { // [MQTT-3.8.3-1]
-			return protocolViolation("malformed SUBSCRIBE topic filter string not valid UTF-8")
+		if err := checkUTF8(topic, false); err != nil { // [MQTT-3.8.3-1]
+			return protocolViolation("malformed SUBSCRIBE Topic Filter string: " + err.Error())
 		}
 
-		topics, qoss = append(topics, string(topic)), append(qoss, p[topicEnd])
+		topics, qoss = append(topics, strings.Split(string(topic), "/")), append(qoss, p[topicEnd])
 		i += 1 + topicL
 	}
 
@@ -442,7 +444,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 		"topics": topics,
 	}).Debug("Got SUBSCRIBE packet")
 
-	s.subscribe <- subList{ses.client, topics, qoss}
+	s.addSubscriptions(ses.client, topics, qoss)
 
 	// [MQTT-3.8.4-1, 4-4, 4-5, 4-6]
 	tl := len(topics)
@@ -457,7 +459,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 
 func (s *Server) handleUnsubscribe(ses *session) error {
 	p := ses.packet.payload
-	topics := make([]string, 0, 2)
+	topics := make([][]string, 0, 2)
 	i := uint32(0)
 
 	for i < uint32(len(p)) {
@@ -465,11 +467,11 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 		i += 2
 		topicEnd := i + topicL
 		topic := p[i:topicEnd]
-		if !checkUTF8(topic, false) { // [MQTT-3.10.3-1]
-			return protocolViolation("malformed UNSUBSCRIBE topic filter string not valid UTF-8")
+		if err := checkUTF8(topic, false); err != nil { // [MQTT-3.10.3-1]
+			return protocolViolation("malformed UNSUBSCRIBE Topic Filter string: " + err.Error())
 		}
 
-		topics = append(topics, string(topic))
+		topics = append(topics, strings.Split(string(topic), "/"))
 		i += topicEnd
 	}
 
@@ -479,7 +481,7 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 	}).Debug("Got UNSUBSCRIBE packet")
 
 	c := ses.client
-	s.unsubscribe <- subList{c, topics, nil}
+	s.removeSubscriptions(c, topics)
 
 	// [MQTT-3.10.4-4, 4-5, 4-6]
 	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = UNSUBACK, 2, ses.packet.vh[0], ses.packet.vh[1]
@@ -501,24 +503,31 @@ func variableLengthEncode(packet []byte, l int) []byte {
 	return packet
 }
 
+var errInvalidUTF = errors.New("invalid UTF8")
+var errContainsWildCards = errors.New("contains wildcard characters")
+
 // [MQTT-1.5.3-1] [MQTT-1.5.3-3]
-func checkUTF8(str []byte, checkWildCards bool) bool {
+func checkUTF8(str []byte, checkWildCards bool) error {
 	for i := 0; i < len(str); {
 		if str[i] == 0 { // [MQTT-1.5.3-2]
-			return false
+			return errInvalidUTF
 		}
 
 		if checkWildCards && (str[i] == '+' || str[i] == '#') { // [MQTT-3.3.2-2]
-			return false
+			return errContainsWildCards
 		} else if str[i]&0x80 == 0 {
 			i++
 		} else {
 			r, size := utf8.DecodeRune(str[i:])
 			if r == utf8.RuneError {
-				return size != 1
+				if size != 1 {
+					return nil
+				} else {
+					return errInvalidUTF
+				}
 			}
 			i += size
 		}
 	}
-	return true
+	return nil
 }

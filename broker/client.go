@@ -12,8 +12,7 @@ type client struct {
 	session       *session
 	subscriptions topT
 	pIDs          chan uint16 // [MQTT-2.3.1-4]
-	pubRX         chan subPub // from server
-	acks          []byte      // TODO: Connack, Suback?
+	acks          []byte
 
 	tx      *bufio.Writer
 	txFlush chan struct{}
@@ -25,8 +24,6 @@ type client struct {
 	q2         queue.QoS12
 	q2Stage2   queue.QoS2Part2
 	q2RxLookup map[uint16]struct{} // inbound
-
-	clear chan struct{}
 }
 
 func newClient(ses *session) *client {
@@ -34,13 +31,12 @@ func newClient(ses *session) *client {
 		session:       ses,
 		subscriptions: make(topT, 4),
 		pIDs:          make(chan uint16, 65536),
-		pubRX:         make(chan subPub, 1),
 		acks:          make([]byte, 4),
 		tx:            bufio.NewWriter(ses.conn),
 		txFlush:       make(chan struct{}, 1),
 		q2RxLookup:    make(map[uint16]struct{}, 2),
-		clear:         make(chan struct{}),
 	}
+
 	c.q0.Init()
 	c.q1.Init()
 	c.q2.Init()
@@ -50,20 +46,7 @@ func newClient(ses *session) *client {
 		c.pIDs <- uint16(i)
 	}
 
-	go c.run()
 	return &c
-}
-
-func (c *client) run() {
-	for {
-		select {
-		case p := <-c.pubRX:
-			c.processPub(p)
-		case <-c.clear:
-			c.clearState()
-			c.clear <- struct{}{}
-		}
-	}
 }
 
 func (c *client) clearState() {
@@ -90,32 +73,32 @@ func (c *client) replaceSession(s *session) {
 	c.session = s
 }
 
-func (c *client) processPub(sp subPub) {
-	finalQoS := sp.p.pubQoS
-	if sp.maxQoS < sp.p.pubQoS {
-		finalQoS = sp.maxQoS
+func (c *client) processPub(p *pub, maxQoS uint8, retained bool) {
+	finalQoS := p.pubQoS
+	if maxQoS < p.pubQoS {
+		finalQoS = maxQoS
 	}
 
 	if finalQoS == 0 {
 		var pubP []byte
-		if sp.retained {
+		if retained {
 			// Make copy, otherwise we race with original packet being sent out without retain flag set.
-			pubP = make([]byte, len(sp.p.pacs[0]))
-			copy(pubP, sp.p.pacs[0])
+			pubP = make([]byte, len(p.pacs[0]))
+			copy(pubP, p.pacs[0])
 			pubP[0] |= 0x01
 		} else {
-			pubP = sp.p.pacs[0]
+			pubP = p.pacs[0]
 		}
 
 		c.q0.Add(pubP)
 	} else { // QoS 1 & 2
 		select {
 		case pID := <-c.pIDs:
-			pubP := make([]byte, len(sp.p.pacs[1]))
-			copy(pubP, sp.p.pacs[1])
+			pubP := make([]byte, len(p.pacs[1]))
+			copy(pubP, p.pacs[1])
 
-			pubP[sp.p.idLoc], pubP[sp.p.idLoc+1] = uint8(pID>>8), uint8(pID)
-			if sp.retained {
+			pubP[p.idLoc], pubP[p.idLoc+1] = uint8(pID>>8), uint8(pID)
+			if retained {
 				pubP[0] |= 0x01
 			}
 
@@ -164,7 +147,8 @@ func (c *client) qos2Part2Done(pID uint16) {
 }
 
 type topL struct {
-	children topT
+	subscribed bool // to this exact level
+	children   topT
 }
 
 type topT map[string]*topL

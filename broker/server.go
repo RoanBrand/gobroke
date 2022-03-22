@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/RoanBrand/gobroke/config"
 	"github.com/RoanBrand/gobroke/websocket"
@@ -17,19 +18,18 @@ const (
 )
 
 type Server struct {
-	config        *config.Config
-	clients       map[string]*client
+	config     *config.Config
+	errs       chan error
+	tcpL, tlsL net.Listener
+
+	sesLock sync.Mutex
+	clients map[string]*client
+
+	subLock       sync.RWMutex
 	subscriptions topicTree
 	retained      retainTree
 
-	errs        chan error
-	register    chan *session
-	unregister  chan *session
-	subscribe   chan subList
-	unsubscribe chan subList
-	pubs        chan pub
-
-	tcpL, tlsL net.Listener
+	pubs chan pub
 }
 
 func NewServer(confPath string) (*Server, error) {
@@ -62,14 +62,10 @@ func NewServer(confPath string) (*Server, error) {
 
 	s := Server{
 		config:        conf,
+		errs:          make(chan error),
 		clients:       make(map[string]*client, 16),
 		subscriptions: make(topicTree, 4),
 		retained:      make(retainTree, 4),
-		errs:          make(chan error),
-		register:      make(chan *session),
-		unregister:    make(chan *session),
-		subscribe:     make(chan subList),
-		unsubscribe:   make(chan subList),
 		pubs:          make(chan pub, serverBuffer),
 	}
 
@@ -92,21 +88,6 @@ func NewServer(confPath string) (*Server, error) {
 }
 
 func (s *Server) Start() error {
-	go s.run()
-	return <-s.errs
-}
-
-func (s *Server) Stop() {
-	log.Info("Shutting down MQTT server")
-	if s.tcpL != nil {
-		s.tcpL.Close()
-	}
-	if s.tlsL != nil {
-		s.tlsL.Close()
-	}
-}
-
-func (s *Server) run() {
 	lf := make(log.Fields, 4)
 	if s.config.TCP.Enabled {
 		lf["tcp_address"] = s.config.TCP.Address
@@ -122,19 +103,24 @@ func (s *Server) run() {
 	}
 	log.WithFields(lf).Info("Starting MQTT server")
 
+	go s.run()
+	return <-s.errs
+}
+
+func (s *Server) Stop() {
+	log.Info("Shutting down MQTT server")
+	if s.tcpL != nil {
+		s.tcpL.Close()
+	}
+	if s.tlsL != nil {
+		s.tlsL.Close()
+	}
+}
+
+func (s *Server) run() {
 	for {
-		select {
-		case ses := <-s.register:
-			s.addSession(ses)
-		case ses := <-s.unregister:
-			s.removeClient(ses.client)
-		case sl := <-s.subscribe:
-			s.addSubscriptions(&sl)
-		case sl := <-s.unsubscribe:
-			s.removeSubscriptions(&sl)
-		case p := <-s.pubs:
-			s.matchSubscriptions(&p)
-		}
+		p := <-s.pubs
+		s.matchSubscriptions(&p)
 	}
 }
 
@@ -216,61 +202,64 @@ func (s *Server) startDispatcher(l net.Listener) {
 	}
 }
 
-func (s *Server) addSession(newses *session) {
+// returns true if session is present and if state is reused.
+func (s *Server) addSession(ses *session) bool {
 	log.WithFields(log.Fields{
-		"client": newses.clientId,
+		"client": ses.clientId,
 	}).Info("New session")
 
 	sendSP := false
-	c, ok := s.clients[newses.clientId] // [MQTT-3.1.2-4]
+
+	s.sesLock.Lock()
+	c, ok := s.clients[ses.clientId] // [MQTT-3.1.2-4]
 	if ok {
 		c.session.stop()
 		log.WithFields(log.Fields{
-			"client": newses.clientId,
+			"client": ses.clientId,
 		}).Debug("Old session present")
 
-		if newses.persistent() && c.session.persistent() {
+		if ses.persistent() && c.session.persistent() {
 			sendSP = true
-			log.WithFields(log.Fields{
-				"client": newses.clientId,
-			}).Debug("New session inheriting previous client state")
 		} else {
-			s.subscriptions.removeClient(c)
-			c.clear <- struct{}{}
-			<-c.clear
+			s.removeClientSubscriptions(c) // [MQTT-3.1.2-6]
+			c.clearState()
 		}
-		c.replaceSession(newses)
+		c.replaceSession(ses)
 	} else {
-		s.clients[newses.clientId] = newClient(newses)
-		c = s.clients[newses.clientId]
+		s.clients[ses.clientId] = newClient(ses)
+		c = s.clients[ses.clientId]
+	}
+	ses.client = c
+	s.sesLock.Unlock()
+
+	if sendSP {
+		log.WithFields(log.Fields{
+			"client": ses.clientId,
+		}).Debug("New session inheriting previous client state")
 	}
 
-	newses.client = c
-	newses.sendConnack(0, sendSP) // [MQTT-3.2.2-1, 2-2, 2-3]
-	newses.run(s.config.MQTT.RetryInterval)
+	return sendSP
 }
 
-func (s *Server) removeClient(c *client) {
-	if c == nil {
+func (s *Server) removeSession(ses *session) {
+	s.sesLock.Lock()
+	defer s.sesLock.Unlock()
+	// check if another new session has not taken over already
+	c, ok := s.clients[ses.clientId]
+	if !ok || c.session != ses {
 		return
 	}
 
 	log.WithFields(log.Fields{
-		"client": c.session.clientId,
+		"client": ses.clientId,
 	}).Debug("Deleting client session (CleanSession)")
 
-	s.subscriptions.removeClient(c)
-	delete(s.clients, c.session.clientId)
-}
-
-type subList struct {
-	c      *client
-	topics []string
-	qoss   []uint8
+	s.removeClientSubscriptions(ses.client)
+	delete(s.clients, ses.clientId)
 }
 
 type pub struct {
-	topic  string
+	topic  []string // split
 	pacs   [][]byte // packets of all QoS levels
 	pubQoS uint8
 	idLoc  uint32 // index of publishID in packet when QoS > 0
@@ -279,7 +268,7 @@ type pub struct {
 }
 
 func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
-	p.topic = string(topicUTF8[2:])
+	p.topic = strings.Split(string(topicUTF8[2:]), "/")
 	if qos == 0 {
 		p.pacs = make([][]byte, 1)
 	} else {
@@ -324,22 +313,27 @@ func (tl *topicLevel) init(size int) {
 type topicTree map[string]*topicLevel // level -> sub levels
 
 // Remove all subscriptions of client.
-func (tt topicTree) removeClient(c *client) {
+func (s *Server) removeClientSubscriptions(c *client) {
 	var unSub func(topicTree, topT)
 	unSub = func(sLevel topicTree, cLevel topT) {
-		for l, nCl := range cLevel {
-			if nSl, ok := sLevel[l]; ok {
-				delete(nSl.subscribers, c)
-				unSub(nSl.children, nCl.children)
+		for l, cTL := range cLevel {
+			sTL := sLevel[l]
+
+			if cTL.subscribed {
+				cTL.subscribed = false
+				delete(sTL.subscribers, c)
 			}
+			unSub(sTL.children, cTL.children)
 		}
 	}
 
-	unSub(tt, c.subscriptions)
+	s.subLock.Lock()
+	unSub(s.subscriptions, c.subscriptions)
+	s.subLock.Unlock()
 }
 
 // Add subscriptions for client. Also check for matching retained messages.
-func (s *Server) addSubscriptions(subs *subList) {
+func (s *Server) addSubscriptions(c *client, topics [][]string, qoss []uint8) {
 	size := func(n int) (s int) {
 		if n < 8 {
 			s = 4
@@ -351,36 +345,39 @@ func (s *Server) addSubscriptions(subs *subList) {
 		return
 	}
 
-	for i, t := range subs.topics {
-		tLevels := strings.Split(t, "/")
-		sLev, cLev := s.subscriptions, subs.c.subscriptions
+	s.subLock.Lock()
+	defer s.subLock.Unlock()
 
-		var sT *topicLevel
+	for i, t := range topics {
+		sLev, cLev := s.subscriptions, c.subscriptions
+
+		var sTL *topicLevel
+		var cTL *topL
 		var ok bool
-		for n, tl := range tLevels {
+		for n, tl := range t {
 			// Server subscriptions
-			if sT, ok = sLev[tl]; !ok {
+			if sTL, ok = sLev[tl]; !ok {
 				sLev[tl] = &topicLevel{}
-				sT = sLev[tl]
-				sT.init(size(n))
+				sTL = sLev[tl]
+				sTL.init(size(n))
 			}
 
 			// Client's subscriptions
-			sC, ok := cLev[tl]
-			if !ok {
+			if cTL, ok = cLev[tl]; !ok {
 				cLev[tl] = &topL{}
-				sC = cLev[tl]
-				sC.children = make(topT, size(n))
+				cTL = cLev[tl]
+				cTL.children = make(topT, size(n))
 			}
 
-			sLev, cLev = sT.children, sC.children
+			sLev, cLev = sTL.children, cTL.children
 		}
-		sT.subscribers[subs.c] = subs.qoss[i]
+		sTL.subscribers[c] = qoss[i]
+		cTL.subscribed = true
 
 		// Retained messages
 		forwardLevel := func(l *retainLevel) {
 			if l.p != nil {
-				subs.c.pubRX <- subPub{l.p, subs.qoss[i], true}
+				c.session.client.processPub(l.p, qoss[i], true)
 			}
 		}
 
@@ -394,17 +391,17 @@ func (s *Server) addSubscriptions(subs *subList) {
 
 		var matchLevel func(retainTree, int)
 		matchLevel = func(l retainTree, n int) {
-			switch tLevels[n] {
+			switch t[n] {
 			case "#":
 				forwardAll(l)
 			case "+":
-				switch len(tLevels) - n {
+				switch len(t) - n {
 				case 1:
 					for _, nl := range l {
 						forwardLevel(nl)
 					}
 				case 2:
-					if tLevels[len(tLevels)-1] == "#" {
+					if t[len(t)-1] == "#" {
 						for _, nl := range l {
 							forwardLevel(nl)
 						}
@@ -416,16 +413,16 @@ func (s *Server) addSubscriptions(subs *subList) {
 					}
 				}
 			default: // direct match
-				nl, ok := l[tLevels[n]]
+				nl, ok := l[t[n]]
 				if !ok {
 					break
 				}
 
-				switch len(tLevels) - n {
+				switch len(t) - n {
 				case 1:
 					forwardLevel(nl)
 				case 2:
-					if tLevels[len(tLevels)-1] == "#" {
+					if t[len(t)-1] == "#" {
 						forwardLevel(nl)
 					}
 					fallthrough
@@ -439,47 +436,51 @@ func (s *Server) addSubscriptions(subs *subList) {
 	}
 }
 
-// TODO: remove subs from client state as well.
-func (s *Server) removeSubscriptions(subs *subList) {
+func (s *Server) removeSubscriptions(c *client, topics [][]string) {
+	var sTL *topicLevel
+	var cTL *topL
+	var ok bool
+
+	s.subLock.Lock()
+	defer s.subLock.Unlock()
+
 loop:
-	for _, t := range subs.topics {
-		tLevels := strings.Split(t, "/")
-		l := s.subscriptions
+	for _, t := range topics {
+		sl, cl := s.subscriptions, c.subscriptions
 
-		var nl *topicLevel
-		var ok bool
-		for _, tl := range tLevels {
-			if nl, ok = l[tl]; !ok {
-				continue loop
+		for _, tl := range t {
+			// Server
+			if sTL, ok = sl[tl]; !ok {
+				continue loop // no one subscribed to this
 			}
-			l = nl.children
-		}
-		delete(nl.subscribers, subs.c)
-	}
-}
 
-type subPub struct {
-	p        *pub
-	maxQoS   uint8
-	retained bool
+			// Client
+			if cTL, ok = cl[tl]; !ok {
+				continue loop // client not subscribed
+			}
+
+			sl, cl = sTL.children, cTL.children
+		}
+
+		delete(sTL.subscribers, c)
+		cTL.subscribed = false
+	}
 }
 
 func (s *Server) forwardToSubscribers(tl *topicLevel, p *pub) {
 	for c, maxQoS := range tl.subscribers {
-		c.pubRX <- subPub{p, maxQoS, false}
+		c.processPub(p, maxQoS, false)
 	}
 }
 
 // Match published message topic to all subscribers, and forward.
 // Also store pub if retained message.
 func (s *Server) matchSubscriptions(p *pub) {
-	tLevels := strings.Split(p.topic, "/")
 	var matchLevel func(topicTree, int)
-
 	matchLevel = func(l topicTree, n int) {
 		// direct match
-		if nl, ok := l[tLevels[n]]; ok {
-			if n < len(tLevels)-1 {
+		if nl, ok := l[p.topic[n]]; ok {
+			if n < len(p.topic)-1 {
 				matchLevel(nl.children, n+1)
 			} else {
 				s.forwardToSubscribers(nl, p)
@@ -496,7 +497,7 @@ func (s *Server) matchSubscriptions(p *pub) {
 
 		// + match
 		if nl, ok := l["+"]; ok {
-			if n < len(tLevels)-1 {
+			if n < len(p.topic)-1 {
 				matchLevel(nl.children, n+1)
 			} else {
 				s.forwardToSubscribers(nl, p)
@@ -506,6 +507,10 @@ func (s *Server) matchSubscriptions(p *pub) {
 			}
 		}
 	}
+
+	s.subLock.RLock()
+	defer s.subLock.RUnlock()
+
 	matchLevel(s.subscriptions, 0)
 
 	if !p.retain {
@@ -515,7 +520,7 @@ func (s *Server) matchSubscriptions(p *pub) {
 	tr := s.retained
 	var nl *retainLevel
 	var ok bool
-	for _, tl := range tLevels {
+	for _, tl := range p.topic {
 		if nl, ok = tr[tl]; !ok {
 			tr[tl] = &retainLevel{children: make(retainTree, 1)}
 			nl = tr[tl]

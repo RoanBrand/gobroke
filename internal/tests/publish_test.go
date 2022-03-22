@@ -3,6 +3,7 @@ package tests_test
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -12,6 +13,96 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
+
+func testPublish(t *testing.T) {
+	t.Parallel()
+	errs := make(chan error, 1)
+
+	c, err := dial("", false, 0, errs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	protoErr := errors.New("The DUP flag MUST be set to 0 for all QoS 0 messages [MQTT-3.3.1-2].")
+
+	if err = c.pubMsgRaw([]byte("msg"), uuid.NewString(), 0, 1, true, func(complete bool, pID uint16) {
+		errs <- protoErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case <-time.After(time.Millisecond * 100):
+		t.Fatal(protoErr)
+	case <-c.dead:
+	}
+
+	c, err = dial("", false, 0, errs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	protoErr = errors.New("A PUBLISH Packet MUST NOT have both QoS bits set to 1. If a Server or Client receives a PUBLISH Packet which has both QoS bits set to 1 it MUST close the Network Connection [MQTT-3.3.1-4].")
+
+	if err = c.pubMsgRaw([]byte("msg"), uuid.NewString(), 3, 1, false, func(complete bool, pID uint16) {
+		errs <- protoErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case <-time.After(time.Millisecond * 100):
+		t.Fatal(protoErr)
+	case <-c.dead:
+	}
+
+	protoErr = errors.New("The Topic Name in the PUBLISH Packet MUST NOT contain wildcard characters [MQTT-3.3.2-2].")
+
+	c, err = dial("", false, 0, errs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err = c.pubMsg([]byte("msg"), "a/+/c", 1, func(complete bool, pID uint16) {
+		errs <- protoErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case <-time.After(time.Millisecond * 100):
+		t.Fatal(protoErr)
+	case <-c.dead:
+	}
+
+	c, err = dial("", false, 0, errs)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err = c.pubMsg([]byte("msg"), "a/b/#", 1, func(complete bool, pID uint16) {
+		errs <- protoErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errs:
+		t.Fatal(err)
+	case <-time.After(time.Millisecond * 100):
+		t.Fatal(protoErr)
+	case <-c.dead:
+	}
+
+	// "A PUBLISH Packet MUST NOT contain a Packet Identifier if its QoS value is set to 0 [MQTT-2.3.1-5]."
+	// Impossible to test because server cannot detect this. If pID included with Qos0, it is read as the start of the payload instead.
+}
 
 func testQoS0(t *testing.T) {
 	t.Parallel()

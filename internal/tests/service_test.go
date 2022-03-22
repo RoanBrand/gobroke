@@ -27,10 +27,13 @@ func TestService(t *testing.T) {
 	}()
 
 	t.Run("cleansession and sessionpresent", testRejoin)
+	t.Run("new clients", testRejoin2)
 	t.Run("qos0", testQoS0)
 	t.Run("qos1", testQoS1)
 	t.Run("qos2", testQoS2)
 	t.Run("connect", testConnect)
+	t.Run("publish", testPublish)
+	t.Run("subscribe", testSubscribe)
 
 	select {
 	case err := <-errs:

@@ -2,9 +2,39 @@ package tests_test
 
 import (
 	"errors"
+	"math/rand"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
+
+func testRejoin2(t *testing.T) {
+	t.Parallel()
+	errs := make(chan error, 1)
+	rand.Seed(time.Now().UnixNano())
+
+	cID := uuid.NewString()
+	var expectOldSession uint8 = 0
+
+	for i := 0; i < 50; i++ {
+		dialCleanSession := rand.Intn(2) == 0
+		if dialCleanSession {
+			expectOldSession = 0
+		}
+
+		_, err := dial(cID, dialCleanSession, expectOldSession, errs)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if dialCleanSession {
+			expectOldSession = 0
+		} else {
+			expectOldSession = 1
+		}
+	}
+}
 
 func testConnect(t *testing.T) {
 	t.Parallel()
@@ -27,8 +57,10 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
 		t.Fatal("server did not close connection:", protoErr)
+	case <-c.connacks:
+		t.Fatal(protoErr)
 	case <-c.dead:
 	}
 
@@ -47,7 +79,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -68,11 +102,11 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
 		t.Fatal(protoErr)
 	case <-c.dead:
 		t.Fatal("no connack received:", protoErr)
-	case connack := <-c.connected:
+	case connack := <-c.connacks:
 		if connack.code != 1 {
 			t.Fatal(protoErr)
 		}
@@ -84,7 +118,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -107,11 +143,11 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
 		t.Fatal(protoErr)
 	case <-c.dead:
 		t.Fatal("no connack received:", protoErr)
-	case connack := <-c.connected:
+	case connack := <-c.connacks:
 		if connack.code != 1 {
 			t.Fatal(protoErr)
 		}
@@ -123,7 +159,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -146,7 +184,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -171,7 +211,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -198,7 +240,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -228,8 +272,12 @@ func testConnect(t *testing.T) {
 		t.Fatal(err)
 	case <-c.dead:
 		t.Fatal(protoErr)
-	case <-time.After(time.Millisecond * 10):
-		// no closed received, assume server accepted. TODO: ping instead to check?
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case connackInfo := <-c.connacks:
+		if connackInfo.code != 0 {
+			t.Fatal(protoErr)
+		}
 	}
 
 	protoErr = errors.New("If the Will Flag is set to 0 the Will QoS and Will Retain fields in the Connect Flags MUST be set to zero and the Will Topic and Will Message fields MUST NOT be present in the payload [MQTT-3.1.2-11].")
@@ -252,8 +300,10 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
 		// If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00) [MQTT-3.1.2-13].
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -276,8 +326,10 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
 		// If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00) [MQTT-3.1.2-13].
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -300,8 +352,10 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
 		t.Fatal(protoErr) // If the Will Flag is set to 0, then the Will Retain Flag MUST be set to 0 [MQTT-3.1.2-15].
+	case <-c.connacks:
+		t.Fatal(protoErr)
 	case <-c.dead:
 	}
 
@@ -325,7 +379,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 100):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -349,7 +405,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -379,7 +437,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -403,7 +463,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -429,7 +491,12 @@ func testConnect(t *testing.T) {
 		t.Fatal(err)
 	case <-c.dead:
 		t.Fatal(protoErr)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case connackInfo := <-c.connacks:
+		if connackInfo.code != 0 {
+			t.Fatal(protoErr)
+		}
 	}
 
 	// Password
@@ -457,7 +524,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -483,7 +552,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -511,7 +582,12 @@ func testConnect(t *testing.T) {
 		t.Fatal(err)
 	case <-c.dead:
 		t.Fatal(protoErr)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case connackInfo := <-c.connacks:
+		if connackInfo.code != 0 {
+			t.Fatal(protoErr)
+		}
 	}
 
 	protoErr = errors.New("If the User Name Flag is set to 0, the Password Flag MUST be set to 0 [MQTT-3.1.2-22].")
@@ -535,7 +611,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -558,7 +636,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
@@ -585,7 +665,12 @@ func testConnect(t *testing.T) {
 		t.Fatal(err)
 	case <-c.dead:
 		t.Fatal(protoErr)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case connackInfo := <-c.connacks:
+		if connackInfo.code != 0 {
+			t.Fatal(protoErr)
+		}
 	}
 
 	protoErr = errors.New("If the Client supplies a zero-byte ClientId with CleanSession set to 0, the Server MUST respond to the CONNECT Packet with a CONNACK return code 0x02 (Identifier rejected) and then close the Network Connection [MQTT-3.1.3-8].")
@@ -604,11 +689,11 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
 		t.Fatal(protoErr)
 	case <-c.dead:
 		t.Fatal("no connack received:", protoErr)
-	case connack := <-c.connected:
+	case connack := <-c.connacks:
 		if connack.code != 2 {
 			t.Fatal(protoErr)
 		}
@@ -620,7 +705,9 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Millisecond * 500):
+		t.Fatal(protoErr)
+	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}

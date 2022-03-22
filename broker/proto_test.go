@@ -94,37 +94,37 @@ func TestUTF8(t *testing.T) {
 	t.Parallel()
 
 	// U+0000 invalid
-	if checkUTF8([]byte{0x00}, false) {
+	if err := checkUTF8([]byte{0x00}, false); err == nil {
 		t.Fatal(0)
 	}
 
 	// U+D7FF valid
-	if !checkUTF8([]byte{0xED, 0x9F, 0xBF, 0x31}, false) {
-		t.Fatal(1)
+	if err := checkUTF8([]byte{0xED, 0x9F, 0xBF, 0x31}, false); err != nil {
+		t.Fatal(1, err)
 	}
 
 	// U+D800 invalid
-	if checkUTF8([]byte{0xED, 0xA0, 0x80}, false) {
+	if err := checkUTF8([]byte{0xED, 0xA0, 0x80}, false); err == nil {
 		t.Fatal(3)
 	}
 
 	// U+DFFF invalid
-	if checkUTF8([]byte{0xED, 0xBF, 0xBF}, false) {
+	if err := checkUTF8([]byte{0xED, 0xBF, 0xBF}, false); err == nil {
 		t.Fatal(4)
 	}
 
 	// U+E000 valid
-	if !checkUTF8([]byte{0xEE, 0x80, 0x80}, false) {
-		t.Fatal(5)
+	if err := checkUTF8([]byte{0xEE, 0x80, 0x80}, false); err != nil {
+		t.Fatal(5, err)
 	}
 
 	// U+0001, U+FEFF valid
-	if !checkUTF8([]byte{0x01, 0xEF, 0xBB, 0xBF, 0x59}, false) {
-		t.Fatal(6)
+	if err := checkUTF8([]byte{0x01, 0xEF, 0xBB, 0xBF, 0x59}, false); err != nil {
+		t.Fatal(6, err)
 	}
 
 	// U+0001, U+FEFF, U+0000 invalid
-	if checkUTF8([]byte{0x01, 0xEF, 0xBB, 0xBF, 0x59, 0}, false) {
+	if err := checkUTF8([]byte{0x01, 0xEF, 0xBB, 0xBF, 0x59, 0}, false); err == nil {
 		t.Fatal(6)
 	}
 }

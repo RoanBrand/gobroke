@@ -30,7 +30,7 @@ func testRejoin(t *testing.T) {
 	gotPubID := false
 	topic := uuid.NewString()
 
-	for i := 0; i < 128; i++ {
+	for i := 0; i < 50; i++ {
 		c1, err := dial(c1Name, false, sp1, errs)
 		if err != nil {
 			t.Fatal(err)
