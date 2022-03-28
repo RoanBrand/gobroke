@@ -649,8 +649,8 @@ func BenchmarkPubs(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	limiter := make(chan struct{}, 63000) // needed so server does not discard msgs destined for c1
-	for i := 0; i < 63000; i++ {
+	limiter := make(chan struct{}, 65500) // needed so server does not discard msgs destined for c1
+	for i := 0; i < 65500; i++ {
 		limiter <- struct{}{}
 	}
 
@@ -689,8 +689,10 @@ func BenchmarkPubs(b *testing.B) {
 
 	msg := make([]byte, 1)
 	f1, f2 := 1, 1
+	start := make(chan struct{})
 
 	go func() {
+		<-start
 		for i := 0; i < b.N; i++ {
 			if qos > 0 {
 				<-limiter
@@ -732,8 +734,9 @@ func BenchmarkPubs(b *testing.B) {
 		done <- struct{}{}
 	}()
 
-	time.Sleep(time.Millisecond) // give chance for everything to startup
+	time.Sleep(time.Millisecond * 10) // give chance for everything to startup
 	b.ResetTimer()
+	close(start)
 
 	select {
 	case err := <-errs:

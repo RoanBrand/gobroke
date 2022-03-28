@@ -2,6 +2,7 @@ package broker
 
 import (
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"net"
 	"os"
@@ -9,12 +10,10 @@ import (
 	"sync"
 
 	"github.com/RoanBrand/gobroke/config"
+	"github.com/RoanBrand/gobroke/internal/model"
+	"github.com/RoanBrand/gobroke/internal/queue"
 	"github.com/RoanBrand/gobroke/websocket"
 	log "github.com/sirupsen/logrus"
-)
-
-const (
-	serverBuffer = 1024
 )
 
 type Server struct {
@@ -29,7 +28,7 @@ type Server struct {
 	subscriptions topicTree
 	retained      retainTree
 
-	pubs chan pub
+	pubs queue.Basic
 }
 
 func NewServer(confPath string) (*Server, error) {
@@ -66,8 +65,9 @@ func NewServer(confPath string) (*Server, error) {
 		clients:       make(map[string]*client, 16),
 		subscriptions: make(topicTree, 4),
 		retained:      make(retainTree, 4),
-		pubs:          make(chan pub, serverBuffer),
 	}
+
+	s.pubs.Init()
 
 	if err := s.setupTCP(); err != nil {
 		return nil, err
@@ -103,7 +103,11 @@ func (s *Server) Start() error {
 	}
 	log.WithFields(lf).Info("Starting MQTT server")
 
-	go s.run()
+	go s.pubs.StartDispatcher(func(i *queue.Item) error {
+		s.matchSubscriptions(i.P)
+		return nil
+	}, nil, nil)
+
 	return <-s.errs
 }
 
@@ -114,13 +118,6 @@ func (s *Server) Stop() {
 	}
 	if s.tlsL != nil {
 		s.tlsL.Close()
-	}
-}
-
-func (s *Server) run() {
-	for {
-		p := <-s.pubs
-		s.matchSubscriptions(&p)
 	}
 }
 
@@ -258,45 +255,12 @@ func (s *Server) removeSession(ses *session) {
 	delete(s.clients, ses.clientId)
 }
 
-type pub struct {
-	topic  []string // split
-	pacs   [][]byte // packets of all QoS levels
-	pubQoS uint8
-	idLoc  uint32 // index of publishID in packet when QoS > 0
-	retain bool
-	empty  bool // zero-byte payload
-}
-
-func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p pub) {
-	p.topic = strings.Split(string(topicUTF8[2:]), "/")
-	if qos == 0 {
-		p.pacs = make([][]byte, 1)
-	} else {
-		p.pacs = make([][]byte, 2)
-	}
-	p.pubQoS = qos
-	tLen := len(topicUTF8)
-	pLen := len(payload)
-	p.retain = retain
-	p.empty = pLen == 0
-
-	// QoS 0
-	p.pacs[0] = make([]byte, 1, 5+tLen+pLen) // ctrl 1 + remainLen 4max + topic(with2bytelen) + msgLen
-	p.pacs[0][0] = PUBLISH
-	p.pacs[0] = variableLengthEncode(p.pacs[0], tLen+pLen)
-	p.pacs[0] = append(p.pacs[0], topicUTF8...) // 2 bytes + topic
-	p.pacs[0] = append(p.pacs[0], payload...)
-
-	// QoS 1 & 2 - each client needs to mask control byte with QoS, and set pubID
-	if qos > 0 {
-		p.pacs[1] = make([]byte, 1, 7+tLen+pLen) // ctrl 1 + remainLen 4max + topic(with2bytelen) + pID 2 + msgLen
-		p.pacs[1][0] = PUBLISH                   // unmasked
-		p.pacs[1] = variableLengthEncode(p.pacs[1], 2+tLen+pLen)
-		p.pacs[1] = append(p.pacs[1], topicUTF8...)
-		p.idLoc = uint32(len(p.pacs[1]))
-		p.pacs[1] = append(p.pacs[1], 0, 0) // pID unset
-		p.pacs[1] = append(p.pacs[1], payload...)
-	}
+func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p model.PubMessage) {
+	p.Raw = make([]byte, 0, len(topicUTF8)+len(payload))
+	p.Raw = append(p.Raw, topicUTF8...)
+	p.Raw = append(p.Raw, payload...)
+	p.RxQoS = qos
+	p.Retain = retain
 	return
 }
 
@@ -376,8 +340,8 @@ func (s *Server) addSubscriptions(c *client, topics [][]string, qoss []uint8) {
 
 		// Retained messages
 		forwardLevel := func(l *retainLevel) {
-			if l.p != nil {
-				c.session.client.processPub(l.p, qoss[i], true)
+			if l.p.Raw != nil {
+				c.processPub(l.p, qoss[i], true)
 			}
 		}
 
@@ -467,7 +431,7 @@ loop:
 	}
 }
 
-func (s *Server) forwardToSubscribers(tl *topicLevel, p *pub) {
+func (s *Server) forwardToSubscribers(tl *topicLevel, p model.PubMessage) {
 	for c, maxQoS := range tl.subscribers {
 		c.processPub(p, maxQoS, false)
 	}
@@ -475,12 +439,15 @@ func (s *Server) forwardToSubscribers(tl *topicLevel, p *pub) {
 
 // Match published message topic to all subscribers, and forward.
 // Also store pub if retained message.
-func (s *Server) matchSubscriptions(p *pub) {
+func (s *Server) matchSubscriptions(p model.PubMessage) {
+	tLen := int(binary.BigEndian.Uint16(p.Raw))
+	topic := strings.Split(string(p.Raw[2:2+tLen]), "/")
+
 	var matchLevel func(topicTree, int)
 	matchLevel = func(l topicTree, n int) {
 		// direct match
-		if nl, ok := l[p.topic[n]]; ok {
-			if n < len(p.topic)-1 {
+		if nl, ok := l[topic[n]]; ok {
+			if n < len(topic)-1 {
 				matchLevel(nl.children, n+1)
 			} else {
 				s.forwardToSubscribers(nl, p)
@@ -497,7 +464,7 @@ func (s *Server) matchSubscriptions(p *pub) {
 
 		// + match
 		if nl, ok := l["+"]; ok {
-			if n < len(p.topic)-1 {
+			if n < len(topic)-1 {
 				matchLevel(nl.children, n+1)
 			} else {
 				s.forwardToSubscribers(nl, p)
@@ -513,14 +480,14 @@ func (s *Server) matchSubscriptions(p *pub) {
 
 	matchLevel(s.subscriptions, 0)
 
-	if !p.retain {
+	if !p.Retain {
 		return
 	}
 
 	tr := s.retained
 	var nl *retainLevel
 	var ok bool
-	for _, tl := range p.topic {
+	for _, tl := range topic {
 		if nl, ok = tr[tl]; !ok {
 			tr[tl] = &retainLevel{children: make(retainTree, 1)}
 			nl = tr[tl]
@@ -529,15 +496,16 @@ func (s *Server) matchSubscriptions(p *pub) {
 		tr = nl.children
 	}
 
-	if p.empty {
-		nl.p = nil // delete existing retained message
+	if len(p.Raw) == 2+tLen {
+		// payload empty, so delete existing retained message
+		nl.p.Raw = nil
 	} else {
 		nl.p = p
 	}
 }
 
 type retainLevel struct {
-	p        *pub
+	p        model.PubMessage
 	children retainTree
 }
 

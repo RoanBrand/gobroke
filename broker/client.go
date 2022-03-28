@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"sync"
 
+	"github.com/RoanBrand/gobroke/internal/model"
 	"github.com/RoanBrand/gobroke/internal/queue"
 	log "github.com/sirupsen/logrus"
 )
@@ -19,7 +20,7 @@ type client struct {
 	txLock  sync.Mutex
 
 	// Queued outbound messages
-	q0         queue.QoS0
+	q0         queue.Basic
 	q1         queue.QoS12
 	q2         queue.QoS12
 	q2Stage2   queue.QoS2Part2
@@ -40,7 +41,7 @@ func newClient(ses *session) *client {
 	c.q0.Init()
 	c.q1.Init()
 	c.q2.Init()
-	c.q2Stage2.Init([]byte{PUBREL | 0x02, 2, 0, 0})
+	c.q2Stage2.Init()
 
 	for i := 1; i <= 65535; i++ { // some clients don't like 0
 		c.pIDs <- uint16(i)
@@ -73,40 +74,24 @@ func (c *client) replaceSession(s *session) {
 	c.session = s
 }
 
-func (c *client) processPub(p *pub, maxQoS uint8, retained bool) {
-	finalQoS := p.pubQoS
-	if maxQoS < p.pubQoS {
+func (c *client) processPub(p model.PubMessage, maxQoS uint8, retained bool) {
+	finalQoS := p.RxQoS
+	if maxQoS < p.RxQoS {
 		finalQoS = maxQoS
 	}
 
-	if finalQoS == 0 {
-		var pubP []byte
-		if retained {
-			// Make copy, otherwise we race with original packet being sent out without retain flag set.
-			pubP = make([]byte, len(p.pacs[0]))
-			copy(pubP, p.pacs[0])
-			pubP[0] |= 0x01
-		} else {
-			pubP = p.pacs[0]
-		}
+	i := &queue.Item{P: p, TxQoS: finalQoS, Retained: retained}
 
-		c.q0.Add(pubP)
-	} else { // QoS 1 & 2
+	if finalQoS == 0 {
+		c.q0.Add(i)
+	} else {
 		select {
 		case pID := <-c.pIDs:
-			pubP := make([]byte, len(p.pacs[1]))
-			copy(pubP, p.pacs[1])
-
-			pubP[p.idLoc], pubP[p.idLoc+1] = uint8(pID>>8), uint8(pID)
-			if retained {
-				pubP[0] |= 0x01
-			}
-
-			pubP[0] |= finalQoS << 1
+			i.PId = pID
 			if finalQoS == 1 {
-				c.q1.Add(pID, pubP)
+				c.q1.Add(i)
 			} else {
-				c.q2.Add(pID, pubP)
+				c.q2.Add(i)
 			}
 		default: // TODO: queue messages anyway and assign IDs later as they become available?
 		}
@@ -114,35 +99,39 @@ func (c *client) processPub(p *pub, maxQoS uint8, retained bool) {
 }
 
 func (c *client) qos1Done(pID uint16) {
-	if !c.q1.Remove(pID) {
+	if c.q1.Remove(pID) == nil {
 		log.WithFields(log.Fields{
 			"client":   c.session.clientId,
 			"packetID": pID,
 		}).Error("Got PUBACK packet for none existing packet")
 		return
 	}
+
 	c.pIDs <- pID
 }
 
 func (c *client) qos2Part1Done(pID uint16) {
-	if !c.q2.Remove(pID) {
+	i := c.q2.Remove(pID)
+	if i == nil {
 		log.WithFields(log.Fields{
 			"client":   c.session.clientId,
 			"packetID": pID,
 		}).Error("Got PUBREC packet for none existing packet")
 		return
 	}
-	c.q2Stage2.Add(pID)
+
+	c.q2Stage2.Add(i)
 }
 
 func (c *client) qos2Part2Done(pID uint16) {
-	if !c.q2Stage2.Remove(pID) {
+	if c.q2Stage2.Remove(pID) == nil {
 		log.WithFields(log.Fields{
 			"client":   c.session.clientId,
 			"packetID": pID,
 		}).Error("Got PUBCOMP packet for none existing packet")
 		return
 	}
+
 	c.pIDs <- pID
 }
 

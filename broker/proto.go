@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/RoanBrand/gobroke/internal/queue"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -185,10 +186,10 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					c.qos1Done(binary.BigEndian.Uint16(p.vh))
 				case PUBREC:
 					c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBREL|0x02, 2, p.vh[0], p.vh[1]
-					c.qos2Part1Done(binary.BigEndian.Uint16(p.vh))
 					if err := ses.writePacket(c.acks); err != nil {
 						return err
 					}
+					c.qos2Part1Done(binary.BigEndian.Uint16(p.vh))
 				case PUBREL: // [MQTT-4.3.3-2]
 					delete(c.q2RxLookup, binary.BigEndian.Uint16(p.vh))
 					c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBCOMP, 2, p.vh[0], p.vh[1]
@@ -400,15 +401,15 @@ func (s *Server) handlePublish(ses *session) error {
 	c := ses.client
 	switch p.flags & 0x06 {
 	case 0x00: // QoS 0
-		s.pubs <- makePub(p.vh[:topicLen+2], p.payload, qos, retain)
+		s.pubs.Add(&queue.Item{P: makePub(p.vh[:topicLen+2], p.payload, qos, retain)})
 	case 0x02: // QoS 1
-		s.pubs <- makePub(p.vh[:topicLen+2], p.payload, qos, retain)
+		s.pubs.Add(&queue.Item{P: makePub(p.vh[:topicLen+2], p.payload, qos, retain)})
 		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBACK, 2, byte(p.pID>>8), byte(p.pID)
 		return ses.writePacket(c.acks)
 	case 0x04: // QoS 2 - [MQTT-4.3.3-2]
 		if _, ok := c.q2RxLookup[p.pID]; !ok {
 			c.q2RxLookup[p.pID] = struct{}{}
-			s.pubs <- makePub(p.vh[:topicLen+2], p.payload, qos, retain)
+			s.pubs.Add(&queue.Item{P: makePub(p.vh[:topicLen+2], p.payload, qos, retain)})
 		}
 		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBREC, 2, byte(p.pID>>8), byte(p.pID)
 		return ses.writePacket(c.acks)
@@ -501,6 +502,22 @@ func variableLengthEncode(packet []byte, l int) []byte {
 		}
 	}
 	return packet
+}
+
+func variableLengthEncodeNoAlloc(l int, f func(eb byte) error) error {
+	for {
+		eb := l % 128
+		l /= 128
+		if l > 0 {
+			eb |= 128
+		}
+		if err := f(byte(eb)); err != nil { // No new memory allocation
+			return err
+		}
+		if l <= 0 {
+			return nil
+		}
+	}
 }
 
 var errInvalidUTF = errors.New("invalid UTF8")

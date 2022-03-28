@@ -1,12 +1,15 @@
 package broker
 
 import (
+	"encoding/binary"
 	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/RoanBrand/gobroke/internal/model"
+	"github.com/RoanBrand/gobroke/internal/queue"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -27,7 +30,7 @@ type session struct {
 	connectFlags byte
 	keepAlive    time.Duration
 
-	will     pub
+	will     model.PubMessage
 	userName string
 	password []byte
 }
@@ -37,19 +40,19 @@ func (s *session) run(retryInterval uint64) {
 	go s.startWriter()
 	c := s.client
 
-	if err := c.q2Stage2.ResendAll(s.writePacket); err != nil {
+	if err := c.q2Stage2.ResendAll(s.sendPubRel); err != nil {
 		log.WithFields(log.Fields{
 			"client": s.clientId,
 			"err":    err,
 		}).Error("Unable to resend all pending QoS2 PUBRELs")
 	}
-	if err := c.q2.ResendAll(s.writePacket); err != nil {
+	if err := c.q2.ResendAll(s.sendPublish); err != nil {
 		log.WithFields(log.Fields{
 			"client": s.clientId,
 			"err":    err,
 		}).Error("Unable to resend all pending QoS2 PUBLISHs")
 	}
-	if err := c.q1.ResendAll(s.writePacket); err != nil {
+	if err := c.q1.ResendAll(s.sendPublish); err != nil {
 		log.WithFields(log.Fields{
 			"client": s.clientId,
 			"err":    err,
@@ -57,14 +60,15 @@ func (s *session) run(retryInterval uint64) {
 	}
 
 	s.stopped.Add(3)
-	go c.q0.StartDispatcher(s.writePacket, &s.dead, &s.stopped)
-	go c.q1.StartDispatcher(s.writePacket, &s.dead, &s.stopped)
-	go c.q2.StartDispatcher(s.writePacket, &s.dead, &s.stopped)
+	go c.q0.StartDispatcher(s.sendPublish, &s.dead, &s.stopped)
+	go c.q1.StartDispatcher(s.sendPublish, &s.dead, &s.stopped)
+	go c.q2.StartDispatcher(s.sendPublish, &s.dead, &s.stopped)
+
 	if retryInterval > 0 {
 		s.stopped.Add(3)
-		go c.q2Stage2.MonitorTimeouts(retryInterval, s.writePacket, s.dead2, &s.stopped)
-		go c.q1.MonitorTimeouts(retryInterval, s.writePacket, s.dead2, &s.stopped)
-		go c.q2.MonitorTimeouts(retryInterval, s.writePacket, s.dead2, &s.stopped)
+		go c.q2Stage2.MonitorTimeouts(retryInterval, s.sendPubRel, s.dead2, &s.stopped)
+		go c.q1.MonitorTimeouts(retryInterval, s.sendPublish, s.dead2, &s.stopped)
+		go c.q2.MonitorTimeouts(retryInterval, s.sendPublish, s.dead2, &s.stopped)
 	}
 }
 
@@ -82,9 +86,9 @@ func (s *session) stop() {
 				}
 			}
 			c.txLock.Unlock()
-			c.q0.Signal()
-			c.q1.Signal()
-			c.q2.Signal()
+			c.q0.NotifyDispatcher()
+			c.q1.NotifyDispatcher()
+			c.q2.NotifyDispatcher()
 		}
 		s.stopped.Wait()
 	})
@@ -94,6 +98,96 @@ func (s *session) updateTimeout() {
 	if s.keepAlive > 0 {
 		s.conn.SetReadDeadline(time.Now().Add(s.keepAlive))
 	}
+}
+
+func (s *session) sendPublish(i *queue.Item) error {
+	var publish byte = PUBLISH
+	if !i.Sent.IsZero() {
+		publish |= 0x08 // set DUP if sent before
+	}
+	if i.Retained {
+		publish |= 0x01
+	}
+
+	rl := len(i.P.Raw)
+	if i.TxQoS > 0 {
+		rl += 2
+		publish |= i.TxQoS << 1
+	}
+
+	s.client.txLock.Lock()
+	defer s.client.txLock.Unlock()
+
+	if err := s.client.tx.WriteByte(publish); err != nil {
+		return err
+	}
+
+	if err := variableLengthEncodeNoAlloc(rl, func(eb byte) error {
+		return s.client.tx.WriteByte(eb)
+	}); err != nil {
+		return err
+	}
+
+	if i.TxQoS == 0 {
+		if _, err := s.client.tx.Write(i.P.Raw); err != nil {
+			return err
+		}
+	} else {
+		tLen := binary.BigEndian.Uint16(i.P.Raw)
+		if _, err := s.client.tx.Write(i.P.Raw[:2+tLen]); err != nil {
+			return err
+		}
+
+		if err := s.client.tx.WriteByte(byte(i.PId >> 8)); err != nil {
+			return err
+		}
+		if err := s.client.tx.WriteByte(byte(i.PId)); err != nil {
+			return err
+		}
+
+		if _, err := s.client.tx.Write(i.P.Raw[2+tLen:]); err != nil {
+			return err
+		}
+	}
+
+	if len(s.client.txFlush) == 0 {
+		select {
+		case s.client.txFlush <- struct{}{}:
+		default:
+		}
+	}
+
+	return nil
+}
+
+func (s *session) sendPubRel(i *queue.Item) error {
+	s.client.txLock.Lock()
+	defer s.client.txLock.Unlock()
+
+	// Header
+	if err := s.client.tx.WriteByte(PUBREL | 0x02); err != nil {
+		return err
+	}
+	// Length
+	if err := s.client.tx.WriteByte(2); err != nil {
+		return err
+	}
+	// pID
+	if err := s.client.tx.WriteByte(byte(i.PId >> 8)); err != nil {
+		return err
+	}
+	if err := s.client.tx.WriteByte(byte(i.PId)); err != nil {
+		return err
+	}
+
+	if len(s.client.txFlush) == 0 {
+		select {
+		case s.client.txFlush <- struct{}{}:
+		default:
+		}
+	}
+
+	return nil
 }
 
 // Send CONNACK with optional Session Present flag.
@@ -143,8 +237,9 @@ func (s *Server) startSession(conn net.Conn) {
 			if !ns.persistent() { // [MQTT-3.1.2-6]
 				s.removeSession(&ns)
 			}
-			if !graceFullExit && len(ns.will.topic) != 0 {
-				s.pubs <- ns.will
+
+			if !graceFullExit && ns.will.Raw != nil {
+				s.pubs.Add(&queue.Item{P: ns.will})
 			}
 		}
 	}()
