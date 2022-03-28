@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/RoanBrand/gobroke/broker"
+	"github.com/RoanBrand/gobroke/internal/broker"
 	"github.com/kardianos/service"
 	log "github.com/sirupsen/logrus"
 )

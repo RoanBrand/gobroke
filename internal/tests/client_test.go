@@ -12,8 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/RoanBrand/gobroke/broker"
-
+	"github.com/RoanBrand/gobroke/internal/broker"
 	"github.com/google/uuid"
 )
 

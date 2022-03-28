@@ -12,7 +12,7 @@ import (
 	"github.com/RoanBrand/gobroke/config"
 	"github.com/RoanBrand/gobroke/internal/model"
 	"github.com/RoanBrand/gobroke/internal/queue"
-	"github.com/RoanBrand/gobroke/websocket"
+	"github.com/RoanBrand/gobroke/internal/websocket"
 	log "github.com/sirupsen/logrus"
 )
 

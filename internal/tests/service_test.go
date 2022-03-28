@@ -3,8 +3,7 @@ package tests_test
 import (
 	"testing"
 
-	"github.com/RoanBrand/gobroke/broker"
-
+	"github.com/RoanBrand/gobroke/internal/broker"
 	"github.com/sirupsen/logrus"
 )
 
