@@ -3,16 +3,13 @@ package tests_test
 import (
 	"testing"
 
-	"github.com/RoanBrand/gobroke/internal/broker"
+	"github.com/RoanBrand/gobroke"
 	"github.com/sirupsen/logrus"
 )
 
 func TestService(t *testing.T) {
 	logrus.SetLevel(logrus.ErrorLevel)
-	s, err := broker.NewServer("../../config.json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := gobroke.Server{}
 
 	t.Cleanup(func() {
 		s.Stop()
@@ -20,7 +17,7 @@ func TestService(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		if err := s.Start(); err != nil {
+		if err := s.Run(); err != nil {
 			errs <- err
 		}
 	}()

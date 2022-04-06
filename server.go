@@ -1,4 +1,4 @@
-package broker
+package gobroke
 
 import (
 	"crypto/tls"
@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/RoanBrand/gobroke/config"
+	"github.com/RoanBrand/gobroke/internal/config"
 	"github.com/RoanBrand/gobroke/internal/model"
 	"github.com/RoanBrand/gobroke/internal/queue"
 	"github.com/RoanBrand/gobroke/internal/websocket"
@@ -17,7 +17,7 @@ import (
 )
 
 type Server struct {
-	config     *config.Config
+	config.Config
 	errs       chan error
 	tcpL, tlsL net.Listener
 
@@ -31,75 +31,46 @@ type Server struct {
 	pubs queue.Basic
 }
 
-func NewServer(confPath string) (*Server, error) {
-	conf, err := config.New(confPath)
-	if err != nil {
-		return nil, err
+func (s *Server) Run() error {
+	if s.TCP.Address == "" && s.TLS.Address == "" && s.WS.Address == "" && s.WSS.Address == "" {
+		s.TCP.Address = ":1883" // default to basic TCP only server if nothing specified.
 	}
 
-	if conf.Log.File != "" {
-		f, err := os.OpenFile(conf.Log.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return nil, err
-		}
-		log.SetOutput(f)
-	}
-	if conf.Log.Level != "" {
-		switch strings.ToLower(conf.Log.Level) {
-		case "error":
-			log.SetLevel(log.ErrorLevel)
-		case "warn":
-			log.SetLevel(log.WarnLevel)
-		case "info":
-			log.SetLevel(log.InfoLevel)
-		case "debug":
-			log.SetLevel(log.DebugLevel)
-		default:
-			return nil, errors.New("unknown log level: " + conf.Log.Level)
-		}
-	}
+	s.errs = make(chan error)
+	s.clients = make(map[string]*client, 16)
+	s.subscriptions = make(topicTree, 4)
+	s.retained = make(retainTree, 4)
 
-	s := Server{
-		config:        conf,
-		errs:          make(chan error),
-		clients:       make(map[string]*client, 16),
-		subscriptions: make(topicTree, 4),
-		retained:      make(retainTree, 4),
-	}
-
+	s.setupLogging()
 	s.pubs.Init()
 
 	if err := s.setupTCP(); err != nil {
-		return nil, err
+		return err
 	}
 	if err := s.setupTLS(); err != nil {
-		return nil, err
+		return err
 	}
 
 	websocket.SetDispatcher(s.startSession)
 	if err := s.setupWebsocket(); err != nil {
-		return nil, err
+		return err
 	}
 	if err := s.setupWebsocketSecure(); err != nil {
-		return nil, err
+		return err
 	}
 
-	return &s, nil
-}
-
-func (s *Server) Start() error {
 	lf := make(log.Fields, 4)
-	if s.config.TCP.Enabled {
-		lf["tcp_address"] = s.config.TCP.Address
+	if s.TCP.Address != "" {
+		lf["tcp_address"] = s.TCP.Address
 	}
-	if s.config.TLS.Enabled {
-		lf["tls_address"] = s.config.TLS.Address
+	if s.TLS.Address != "" {
+		lf["tls_address"] = s.TLS.Address
 	}
-	if s.config.WS.Enabled {
-		lf["ws_address"] = s.config.WS.Address
+	if s.WS.Address != "" {
+		lf["ws_address"] = s.WS.Address
 	}
-	if s.config.WSS.Enabled {
-		lf["wss_address"] = s.config.WSS.Address
+	if s.WSS.Address != "" {
+		lf["wss_address"] = s.WSS.Address
 	}
 	log.WithFields(lf).Info("Starting MQTT server")
 
@@ -121,12 +92,38 @@ func (s *Server) Stop() {
 	}
 }
 
+func (s *Server) setupLogging() error {
+	if s.Log.File != "" {
+		f, err := os.OpenFile(s.Log.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return err
+		}
+		log.SetOutput(f)
+	}
+	if s.Log.Level != "" {
+		switch strings.ToLower(s.Log.Level) {
+		case "error":
+			log.SetLevel(log.ErrorLevel)
+		case "warn":
+			log.SetLevel(log.WarnLevel)
+		case "info":
+			log.SetLevel(log.InfoLevel)
+		case "debug":
+			log.SetLevel(log.DebugLevel)
+		default:
+			return errors.New("unknown log level: " + s.Log.Level)
+		}
+	}
+
+	return nil
+}
+
 func (s *Server) setupTCP() error {
-	if !s.config.TCP.Enabled {
+	if s.TCP.Address == "" {
 		return nil
 	}
 
-	l, err := net.Listen("tcp", s.config.TCP.Address)
+	l, err := net.Listen("tcp", s.TCP.Address)
 	if err != nil {
 		return err
 	}
@@ -137,16 +134,16 @@ func (s *Server) setupTCP() error {
 }
 
 func (s *Server) setupTLS() error {
-	if !s.config.TLS.Enabled {
+	if s.TLS.Address == "" {
 		return nil
 	}
 
-	cert, err := os.ReadFile(s.config.TLS.Cert)
+	cert, err := os.ReadFile(s.TLS.Cert)
 	if err != nil {
 		return err
 	}
 
-	key, err := os.ReadFile(s.config.TLS.Key)
+	key, err := os.ReadFile(s.TLS.Key)
 	if err != nil {
 		return err
 	}
@@ -157,7 +154,7 @@ func (s *Server) setupTLS() error {
 	}
 	config := tls.Config{Certificates: []tls.Certificate{kp}}
 
-	l, err := tls.Listen("tcp", s.config.TLS.Address, &config)
+	l, err := tls.Listen("tcp", s.TLS.Address, &config)
 	if err != nil {
 		return err
 	}
@@ -168,16 +165,16 @@ func (s *Server) setupTLS() error {
 }
 
 func (s *Server) setupWebsocket() error {
-	if !s.config.WS.Enabled {
+	if s.WS.Address == "" {
 		return nil
 	}
 
-	return websocket.Setup(s.config.WS.Address, s.config.WS.CheckOrigin, s.errs)
+	return websocket.Setup(s.WS.Address, s.WS.CheckOrigin, s.errs)
 }
 
 func (s *Server) setupWebsocketSecure() error {
-	c := &s.config.WSS
-	if !c.Enabled {
+	c := &s.WSS
+	if c.Address == "" {
 		return nil
 	}
 

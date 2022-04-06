@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RoanBrand/gobroke/internal/broker"
+	"github.com/RoanBrand/gobroke"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
@@ -105,19 +105,7 @@ func testPublish(t *testing.T) {
 
 func testQoS0(t *testing.T) {
 	t.Parallel()
-	//logrus.SetLevel(logrus.ErrorLevel)
-
 	errs := make(chan error, 1)
-	/*s, err := broker.NewServer("../../config.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop()
-	go func() {
-		if err := s.Start(); err != nil {
-			errs <- err
-		}
-	}()*/
 
 	c1, err := dial("", true, 0, errs)
 	if err != nil {
@@ -170,19 +158,7 @@ func testQoS0(t *testing.T) {
 
 func testQoS1(t *testing.T) {
 	t.Parallel()
-	//logrus.SetLevel(logrus.ErrorLevel)
-
 	errs := make(chan error, 1)
-	/*s, err := broker.NewServer("../../config.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop()
-	go func() {
-		if err := s.Start(); err != nil {
-			errs <- err
-		}
-	}()*/
 
 	c1, err := dial("", false, 0, errs)
 	if err != nil {
@@ -301,19 +277,7 @@ func testQoS1(t *testing.T) {
 
 func testQoS2(t *testing.T) {
 	t.Parallel()
-	//logrus.SetLevel(logrus.ErrorLevel)
-
 	errs := make(chan error, 1)
-	/*s, err := broker.NewServer("../../config.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop()
-	go func() {
-		if err := s.Start(); err != nil {
-			errs <- err
-		}
-	}()*/
 
 	c1 := newClient("", errs)
 	err := c1.connect(false, 0)
@@ -622,13 +586,14 @@ func BenchmarkPubs(b *testing.B) {
 	var qos uint8 = 2 // Change QoS level here
 
 	errs := make(chan error, 1)
-	s, err := broker.NewServer("../../config.json")
+	s := gobroke.Server{}
+	/*s, err := gobroke.New("../../config.json")
 	if err != nil {
 		b.Fatal(err)
-	}
+	}*/
 	defer s.Stop()
 	go func() {
-		if err := s.Start(); err != nil {
+		if err := s.Run(); err != nil {
 			errs <- err
 		}
 	}()

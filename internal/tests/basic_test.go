@@ -9,19 +9,7 @@ import (
 
 func testRejoin(t *testing.T) {
 	t.Parallel()
-	/*logrus.SetLevel(logrus.ErrorLevel)
-	s, err := broker.NewServer("../../config.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Stop()*/
-
 	errs := make(chan error, 1)
-	/*go func() {
-		if err := s.Start(); err != nil {
-			errs <- err
-		}
-	}()*/
 
 	var oldC1, oldC2 *fakeClient
 	c1Name, c2Name := generateNewClientID(), generateNewClientID()

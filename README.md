@@ -1,29 +1,61 @@
 # gobroke
 My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 
-## Features
-##### Configuration File
-* JSON config file for setup. See `config.json`
-* Config example and description:
+## Installation
+```bash
+go get github.com/RoanBrand/gobroke
+```
+## Basic Usage
+```go
+import "github.com/RoanBrand/gobroke"
+
+s := gobroke.Server{}
+err := s.Run()
+if err != nil {
+	panic(err)
+}
+```
+`s.Run()` starts a MQTT broker listening on TCP port 1883.  
+It blocks while service is running until `s.Stop()` is called, where it returns `nil`, or it crashes for some reason.
+
+## Extended Configuration
+```go
+s := gobroke.Server{}
+s.TCP.Address = ""
+s.TLS.Address = ":8883"
+s.TLS.Certificate = "certs/example.crt"
+s.TLS.Certificate = "certs/example.key"
+s.WS.Address = ":8080"
+
+s.Run()
+```
+You can configure network protocols TCP, TLS, Websocket, and Secure Websocket (WSS). Setting the `Address` field to `""` disables the network protocol and listener.  
+If all addresses are blank, or no config is provided, the server will default to using just TCP ":1883"
+
+## OS Service (Standalone Build)
+* The service can be built into a standalone server binary executable by running `make build`
+* Copy the `gobroke` binary and `config.json` to server folder and run `gobroke -service install`
+* Service can then be started with `gobroke -service start` or from the OS Service Manager
+* The config file can be omitted, in which case the server will just listen on TCP ":1883"
+
+##### Configuration
+* See `internal/config/config.go` for all options.
+* Example JSON config file for standalone server:
 ```javascript
 {
 	"tcp": {
-		"enabled": true,
 		"address": ":1883"                 // ip/host & port
 	},
 	"tls": {                                   // Secure TCP
-		"enabled": true,
 		"address": ":8883",
 		"cert": "path_to_TLS_certificate",
 		"key": "path_to_private_key"
 	},
 	"ws": {                                    // Websocket
-		"enabled": true,
 		"address": ":80",
 		"check_origin": false              // check request origin
 	},
 	"wss": {                                   // Secure Websocket over HTTPS
-		"enabled": true,
 		"address": ":443",
 		"check_origin": false,
 		"cert": "path_to_TLS_certificate",
@@ -32,19 +64,12 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 	"log": {
 		"file": "path_to_log_file",        // log to file if specified
 		"level": "info"                    // error, warn, info, debug
-	},
-	"mqtt": {
-	    "retry_interval": 0                    // QoS 1&2 unacknowledged message resend timeout in ms
-	                                           // Set to 0 to disable. Will always resend once on new conn
 	}
 }
 ```
-* Default values for ports, loglevel, and mqtt protocol specific config shown
-* Most of config is optional, but one of `tcp`, `tls`, `ws` or `wss` must be specified and enabled
-##### OS Service
-* Build then copy the binary and config file to a folder you want and run `gobroke -service install`
-* Service can then be started with `gobroke -service start` or from the OS Service Manager
-##### QoS 1 & 2
+* See `config.json` for an example config file.
+* Config file path can be overridden with `gobroke -c="path_to_config_file"`
+
 ##### TLS
 * Example self-signed certificates included that can be used by MQTT clients on `localhost`
 * Make sure MQTT client does not use regular TCP port (default `8883`, not `1883`)
@@ -55,17 +80,8 @@ My own implementation of MQTT v3.1.1 server. Advanced and free to use.
 ## Test
 * `make test`
 
-## Run
-* `go run run.go -c="config.json"`
-
-## Build
-* Run `go build` inside parent `gobroke` dir
-* Binary can now be run as is if `config.json` present in the same dir
-* Config path can be overridden with `gobroke -c="path_to_config_file"`
-
 ## TODO
-* Parallel tests running on single instance, covering entire spec.
-* Refactor to allow embeddable into another project with clean API.
+* Tests to cover entire MQTT spec.
 * Persistence (levelDB?)
 * MQTT 5
 * $SYS Topic

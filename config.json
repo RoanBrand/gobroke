@@ -1,20 +1,20 @@
 {
 	"tcp": {
-		"enabled": true,
 		"address": ":1883"
 	},
 	"tls": {
-		"enabled": false,
 		"address": ":8883",
 		"cert": "certs/example.crt",
 		"key": "certs/example.key"
 	},
 	"ws": {
-		"enabled": false,
-		"address": ":80",
+		"address": ":8080",
 		"check_origin": false
 	},
-	"mqtt": {
-		"retry_interval": 50000
+	"wss": {
+		"address": ":8443",
+		"check_origin": false,
+		"cert": "certs/example.crt",
+		"key": "certs/example.key"
 	}
 }

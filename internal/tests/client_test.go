@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/RoanBrand/gobroke/internal/broker"
+	"github.com/RoanBrand/gobroke/internal/model"
 	"github.com/google/uuid"
 )
 
@@ -97,9 +97,9 @@ func (c *fakeClient) reader() {
 				lenMul *= 128
 				if rx[i]&128 == 0 {
 					switch controlAndFlags & 0xF0 {
-					case broker.PUBLISH:
+					case model.PUBLISH:
 						vhLen = 0
-					case broker.PINGRESP:
+					case model.PINGRESP:
 						c.pingResponses <- struct{}{}
 					default: // CONNACK, PUBACK, SUBACK
 						vhLen = 2
@@ -109,7 +109,7 @@ func (c *fakeClient) reader() {
 						rxState = 0
 					} else {
 						vh = vh[:0]
-						if controlAndFlags&0xF0 == broker.PUBLISH {
+						if controlAndFlags&0xF0 == model.PUBLISH {
 							rxState = 2
 						} else {
 							rxState = 3
@@ -142,9 +142,9 @@ func (c *fakeClient) reader() {
 
 				if vhLen == 0 {
 					switch controlAndFlags & 0xF0 {
-					case broker.CONNACK:
+					case model.CONNACK:
 						c.connacks <- connackInfo{vh[0], vh[1]}
-					case broker.PUBACK:
+					case model.PUBACK:
 						pID := binary.BigEndian.Uint16(vh)
 						c.qL.Lock()
 						if pi, ok := c.q1Pubacks[pID]; ok {
@@ -160,7 +160,7 @@ func (c *fakeClient) reader() {
 							c.errs <- fmt.Errorf("error: received unknown PUBACK with ID %d", pID)
 							return
 						}
-					case broker.PUBREC:
+					case model.PUBREC:
 						pID := binary.BigEndian.Uint16(vh)
 						c.qL.Lock()
 						if pi, ok := c.q2Pubrecs[pID]; ok {
@@ -181,7 +181,7 @@ func (c *fakeClient) reader() {
 							c.errs <- fmt.Errorf("error: received unknown PUBREC with ID %d", pID)
 							return
 						}
-					case broker.PUBCOMP:
+					case model.PUBCOMP:
 						pID := binary.BigEndian.Uint16(vh)
 						c.qL.Lock()
 						if pi, ok := c.q2Pubcomps[pID]; ok {
@@ -198,14 +198,14 @@ func (c *fakeClient) reader() {
 							return
 						}
 
-					case broker.PUBREL:
+					case model.PUBREL:
 						pID := binary.BigEndian.Uint16(vh)
 						c.pubrels <- pID
 					}
 
 					payload = payload[:0]
 					if remainLen == 0 {
-						if controlAndFlags&0xF0 == broker.PUBLISH {
+						if controlAndFlags&0xF0 == model.PUBLISH {
 							if err := c.handlePub(controlAndFlags, vh, payload); err != nil {
 								c.errs <- err
 								return
@@ -228,12 +228,12 @@ func (c *fakeClient) reader() {
 
 				if remainLen == 0 {
 					switch controlAndFlags & 0xF0 {
-					case broker.PUBLISH:
+					case model.PUBLISH:
 						if err := c.handlePub(controlAndFlags, vh, payload); err != nil {
 							c.errs <- err
 							return
 						}
-					case broker.SUBACK:
+					case model.SUBACK:
 						c.subbed <- subackInfo{binary.BigEndian.Uint16(vh), payload[0]}
 					}
 					rxState = 0
@@ -333,14 +333,14 @@ func (c *fakeClient) sendConnectPacket(cleanSession bool) error {
 	}
 
 	l := byte(len(c.ClientID))
-	connectPack := []byte{broker.CONNECT, 12 + l, 0, 4, 'M', 'Q', 'T', 'T', 4, cf, 0, 0, 0, l}
+	connectPack := []byte{model.CONNECT, 12 + l, 0, 4, 'M', 'Q', 'T', 'T', 4, cf, 0, 0, 0, l}
 	connectPack = append(connectPack, []byte(c.ClientID)...)
 	return c.writePacket(connectPack)
 }
 
 func (c *fakeClient) sendUnknownProtocolNameConnectPacket() error {
 	l := byte(len(c.ClientID))
-	connectPack := []byte{broker.CONNECT, 12 + l, 0, 4, 'F', 'A', 'K', 'E', 4, 0, 0, 0, 0, l}
+	connectPack := []byte{model.CONNECT, 12 + l, 0, 4, 'F', 'A', 'K', 'E', 4, 0, 0, 0, 0, l}
 	connectPack = append(connectPack, []byte(c.ClientID)...)
 	return c.writePacket(connectPack)
 }
@@ -417,8 +417,8 @@ func (c *fakeClient) pubMsgRaw(msg []byte, topic string, qos uint8, pubID uint16
 	}
 
 	c.workBuf = c.workBuf[:0]
-	c.workBuf = append(c.workBuf, broker.PUBLISH)
-	c.workBuf = broker.VariableLengthEncode(c.workBuf, pacLen)
+	c.workBuf = append(c.workBuf, model.PUBLISH)
+	c.workBuf = model.VariableLengthEncode(c.workBuf, pacLen)
 	c.workBuf = append(c.workBuf, uint8(len(topic)>>8), uint8(len(topic)))
 	c.workBuf = append(c.workBuf, []byte(topic)...)
 	if qos > 0 {
@@ -442,8 +442,8 @@ func (c *fakeClient) pubMsgRaw(msg []byte, topic string, qos uint8, pubID uint16
 
 func (c *fakeClient) sub(topic string, qos uint8) error {
 	pId := <-c.pIDs
-	b := []byte{broker.SUBSCRIBE | 2}
-	b = broker.VariableLengthEncode(b, len(topic)+5)
+	b := []byte{model.SUBSCRIBE | 2}
+	b = model.VariableLengthEncode(b, len(topic)+5)
 	b = append(b, uint8(pId>>8), uint8(pId), uint8(len(topic)>>8), uint8(len(topic)))
 	b = append(b, []byte(topic)...)
 	b = append(b, qos)
@@ -472,39 +472,39 @@ func (c *fakeClient) sub(topic string, qos uint8) error {
 
 func (c *fakeClient) sendPuback(pID uint16) error {
 	c.workBuf = c.workBuf[:0]
-	c.workBuf = append(c.workBuf, broker.PUBACK, 2, uint8(pID>>8), uint8(pID))
-	//c.acks[0], c.acks[1], c.acks[2], c.acks[3] = broker.PUBACK, 2, uint8(pID >> 8), uint8(pID)
+	c.workBuf = append(c.workBuf, model.PUBACK, 2, uint8(pID>>8), uint8(pID))
+	//c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBACK, 2, uint8(pID >> 8), uint8(pID)
 	err := c.writePacket(c.workBuf)
 	return err
 }
 
 func (c *fakeClient) sendPubrec(pID uint16) error {
 	c.workBuf = c.workBuf[:0]
-	c.workBuf = append(c.workBuf, broker.PUBREC, 2, uint8(pID>>8), uint8(pID))
-	//c.acks[0], c.acks[1], c.acks[2], c.acks[3] = broker.PUBREC, 2, uint8(pID >> 8), uint8(pID)
+	c.workBuf = append(c.workBuf, model.PUBREC, 2, uint8(pID>>8), uint8(pID))
+	//c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBREC, 2, uint8(pID >> 8), uint8(pID)
 	err := c.writePacket(c.workBuf)
 	return err
 }
 
 func (c *fakeClient) sendPubrel(pID uint16) error {
-	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = broker.PUBREL|2, 2, uint8(pID>>8), uint8(pID)
+	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBREL|2, 2, uint8(pID>>8), uint8(pID)
 	err := c.writePacket(c.acks)
 	return err
 }
 
 func (c *fakeClient) sendPubcomp(pID uint16) error {
-	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = broker.PUBCOMP, 2, uint8(pID>>8), uint8(pID)
+	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBCOMP, 2, uint8(pID>>8), uint8(pID)
 	err := c.writePacket(c.acks)
 	return err
 }
 
 func (c *fakeClient) sendPing() error {
-	c.acks[0], c.acks[1] = broker.PINGREQ, 0
+	c.acks[0], c.acks[1] = model.PINGREQ, 0
 	return c.writePacket(c.acks[:2])
 }
 
 func (c *fakeClient) sendDisconnect() error {
-	c.acks[0], c.acks[1] = broker.DISCONNECT, 0
+	c.acks[0], c.acks[1] = model.DISCONNECT, 0
 	err := c.writePacket(c.acks[:2])
 	return err
 }

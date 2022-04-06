@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/RoanBrand/gobroke/internal/broker"
+	"github.com/RoanBrand/gobroke/internal/model"
 	"github.com/google/uuid"
 )
 
@@ -23,7 +23,7 @@ func testSubscribe(t *testing.T) {
 	topic := uuid.NewString()
 	var pId uint16 = 10
 
-	b := []byte{broker.SUBSCRIBE, 5 + uint8(len(topic)), uint8(pId >> 8), uint8(pId), 0, uint8(len(topic))}
+	b := []byte{model.SUBSCRIBE, 5 + uint8(len(topic)), uint8(pId >> 8), uint8(pId), 0, uint8(len(topic))}
 	b = append(b, []byte(topic)...)
 	b = append(b, 1)
 	err = c.writePacket(b)
@@ -46,7 +46,7 @@ func testSubscribe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b = []byte{broker.SUBSCRIBE | 0b1111, 5 + uint8(len(topic)), uint8(pId >> 8), uint8(pId), 0, uint8(len(topic))}
+	b = []byte{model.SUBSCRIBE | 0b1111, 5 + uint8(len(topic)), uint8(pId >> 8), uint8(pId), 0, uint8(len(topic))}
 	b = append(b, []byte(topic)...)
 	b = append(b, 1)
 	err = c.writePacket(b)
@@ -69,7 +69,7 @@ func testSubscribe(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	b = []byte{broker.SUBSCRIBE | 0b0010, 5 + uint8(len(topic)), uint8(pId >> 8), uint8(pId), 0, uint8(len(topic))}
+	b = []byte{model.SUBSCRIBE | 0b0010, 5 + uint8(len(topic)), uint8(pId >> 8), uint8(pId), 0, uint8(len(topic))}
 	b = append(b, []byte(topic)...)
 	b = append(b, 1)
 	err = c.writePacket(b)

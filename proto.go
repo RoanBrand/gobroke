@@ -1,4 +1,4 @@
-package broker
+package gobroke
 
 import (
 	"bytes"
@@ -13,6 +13,26 @@ import (
 	"github.com/RoanBrand/gobroke/internal/queue"
 	log "github.com/sirupsen/logrus"
 )
+
+var (
+	connectPacket  = []byte{0, 4, 'M', 'Q', 'T', 'T', 4}
+	pingRespPacket = []byte{model.PINGRESP, 0}
+)
+
+// MQTT packet parser states
+const (
+	// Fixed header
+	controlAndFlags = iota
+	length
+
+	variableHeaderLen
+	variableHeader
+	payload
+)
+
+// QoS 1&2 unacknowledged message resend timeout in ms
+// Set to 0 to disable. Will always resend once on new conn.
+var pubTimeout uint64 = 50000
 
 var errCleanExit = errors.New("cleanExit")
 
@@ -29,46 +49,46 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 		case controlAndFlags:
 			p.controlType, p.flags = rx[i]&0xF0, rx[i]&0x0F
 
-			if p.controlType < CONNECT || p.controlType > DISCONNECT {
+			if p.controlType < model.CONNECT || p.controlType > model.DISCONNECT {
 				return protocolViolation("invalid control packet")
 			}
 
 			// handle first and only connect
 			if ses.connectSent {
-				if p.controlType == CONNECT { // [MQTT-3.1.0-2]
+				if p.controlType == model.CONNECT { // [MQTT-3.1.0-2]
 					return protocolViolation("second CONNECT packet")
 				}
 			} else {
-				if p.controlType != CONNECT { // [MQTT-3.1.0-1]
+				if p.controlType != model.CONNECT { // [MQTT-3.1.0-1]
 					return protocolViolation("first packet not CONNECT")
 				}
 			}
 
 			switch p.controlType { // [MQTT-2.2.2-1, 2-2]
-			case CONNECT, PUBACK, PUBREC, PUBCOMP, PINGREQ:
+			case model.CONNECT, model.PUBACK, model.PUBREC, model.PUBCOMP, model.PINGREQ:
 				if p.flags != 0 {
 					return protocolViolation("malformed packet - Fixed header flags must be 0 (reserved)")
 				}
-			case PUBLISH:
+			case model.PUBLISH:
 				if (p.flags&0x08 > 0) && (p.flags&0x06 == 0) { // [MQTT-3.3.1-2]
 					return protocolViolation("malformed PUBLISH - DUP set for QoS0 Pub")
 				}
 				if p.flags&0x06 == 6 { // [MQTT-3.3.1-4]
 					return protocolViolation("malformed PUBLISH - No QoS3")
 				}
-			case PUBREL:
+			case model.PUBREL:
 				if p.flags != 0x02 {
 					return protocolViolation("malformed PUBREL")
 				}
-			case SUBSCRIBE:
+			case model.SUBSCRIBE:
 				if p.flags != 0x02 { // [MQTT-3.8.1-1]
 					return protocolViolation("malformed SUBSCRIBE")
 				}
-			case UNSUBSCRIBE:
+			case model.UNSUBSCRIBE:
 				if p.flags != 0x02 { // [MQTT-3.10.1-1]
 					return protocolViolation("malformed UNSUBSCRIBE")
 				}
-			case DISCONNECT:
+			case model.DISCONNECT:
 				if p.flags != 0 {
 					return protocolViolation("malformed DISCONNECT - Fixed header flags must be 0 (reserved)")
 				}
@@ -93,26 +113,26 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 			if rx[i]&128 == 0 {
 				switch p.controlType {
-				case CONNECT:
+				case model.CONNECT:
 					if p.remainingLength < 12 { // [MQTT-3.1.3-3]
 						return protocolViolation("invalid CONNECT - absent clientId in payload")
 					}
 					p.vhLen = 10
-				case PUBLISH:
+				case model.PUBLISH:
 					p.vhLen = 0 // determined later
-				case PUBACK, PUBREC, PUBREL, PUBCOMP:
+				case model.PUBACK, model.PUBREC, model.PUBREL, model.PUBCOMP:
 					p.vhLen = 2
-				case SUBSCRIBE:
+				case model.SUBSCRIBE:
 					if p.remainingLength < 5 { // [MQTT-3.8.3-3]
 						return protocolViolation("invalid SUBSCRIBE - no topic filter")
 					}
 					p.vhLen = 2
-				case UNSUBSCRIBE:
+				case model.UNSUBSCRIBE:
 					if p.remainingLength < 5 { // [MQTT-3.10.3-2]
 						return protocolViolation("invalid UNSUBSCRIBE - no topic filter")
 					}
 					p.vhLen = 2
-				case PINGREQ:
+				case model.PINGREQ:
 					if err := ses.writePacket(pingRespPacket); err != nil {
 						return err
 					}
@@ -123,7 +143,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					ses.rxState = controlAndFlags
 				} else {
 					p.vh = p.vh[:0]
-					if p.controlType == PUBLISH {
+					if p.controlType == model.PUBLISH {
 						ses.rxState = variableHeaderLen
 					} else {
 						ses.rxState = variableHeader
@@ -160,7 +180,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			if p.vhLen == 0 {
 				c := ses.client
 				switch p.controlType {
-				case CONNECT:
+				case model.CONNECT:
 					if !bytes.Equal(connectPacket, p.vh[:7]) { // [MQTT-3.1.2-1]
 						ses.sendConnack(1, false) // [MQTT-3.1.2-2]
 						return protocolViolation("unsupported client protocol. Must be MQTT v3.1.1")
@@ -173,7 +193,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 					// [MQTT-3.1.2-24]
 					ses.keepAlive = time.Duration(binary.BigEndian.Uint16(p.vh[8:])) * time.Second * 3 / 2
-				case PUBLISH:
+				case model.PUBLISH:
 					tLen := uint32(binary.BigEndian.Uint16(p.vh))
 					if tLen > 0 {
 						if err := checkUTF8(p.vh[2:2+tLen], true); err != nil { // [MQTT-3.3.2-1]
@@ -183,28 +203,28 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					if p.flags&0x06 > 0 { // Qos > 0
 						p.pID = binary.BigEndian.Uint16(p.vh[len(p.vh)-2:])
 					}
-				case PUBACK:
+				case model.PUBACK:
 					c.qos1Done(binary.BigEndian.Uint16(p.vh))
-				case PUBREC:
-					c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBREL|0x02, 2, p.vh[0], p.vh[1]
+				case model.PUBREC:
+					c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBREL|0x02, 2, p.vh[0], p.vh[1]
 					if err := ses.writePacket(c.acks); err != nil {
 						return err
 					}
 					c.qos2Part1Done(binary.BigEndian.Uint16(p.vh))
-				case PUBREL: // [MQTT-4.3.3-2]
+				case model.PUBREL: // [MQTT-4.3.3-2]
 					delete(c.q2RxLookup, binary.BigEndian.Uint16(p.vh))
-					c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBCOMP, 2, p.vh[0], p.vh[1]
+					c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBCOMP, 2, p.vh[0], p.vh[1]
 					if err := ses.writePacket(c.acks); err != nil {
 						return err
 					}
-				case PUBCOMP:
+				case model.PUBCOMP:
 					c.qos2Part2Done(binary.BigEndian.Uint16(p.vh))
 				}
 
 				p.payload = p.payload[:0]
 				if p.remainingLength == 0 {
 					ses.updateTimeout()
-					if p.controlType == PUBLISH {
+					if p.controlType == model.PUBLISH {
 						if err := s.handlePublish(ses); err != nil {
 							return err
 						}
@@ -229,13 +249,13 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			if p.remainingLength == 0 {
 				var err error
 				switch p.controlType {
-				case CONNECT:
+				case model.CONNECT:
 					err = s.handleConnect(ses)
-				case PUBLISH:
+				case model.PUBLISH:
 					err = s.handlePublish(ses)
-				case SUBSCRIBE:
+				case model.SUBSCRIBE:
 					err = s.handleSubscribe(ses)
-				case UNSUBSCRIBE:
+				case model.UNSUBSCRIBE:
 					err = s.handleUnsubscribe(ses)
 				}
 				if err != nil {
@@ -379,7 +399,7 @@ func (s *Server) handleConnect(ses *session) error {
 
 	ses.sendConnack(0, s.addSession(ses)) // [MQTT-3.2.2-1, 2-2, 2-3]
 	ses.connectSent = true
-	ses.run(s.config.MQTT.RetryInterval)
+	ses.run(pubTimeout)
 	return nil
 }
 
@@ -410,14 +430,14 @@ func (s *Server) handlePublish(ses *session) error {
 		s.pubs.Add(&queue.Item{P: pub})
 	case 1:
 		s.pubs.Add(&queue.Item{P: pub})
-		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBACK, 2, byte(p.pID>>8), byte(p.pID)
+		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBACK, 2, byte(p.pID>>8), byte(p.pID)
 		return ses.writePacket(c.acks)
 	case 2: // [MQTT-4.3.3-2]
 		if _, ok := c.q2RxLookup[p.pID]; !ok {
 			c.q2RxLookup[p.pID] = struct{}{}
 			s.pubs.Add(&queue.Item{P: pub})
 		}
-		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBREC, 2, byte(p.pID>>8), byte(p.pID)
+		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBREC, 2, byte(p.pID>>8), byte(p.pID)
 		return ses.writePacket(c.acks)
 	}
 
@@ -456,8 +476,8 @@ func (s *Server) handleSubscribe(ses *session) error {
 	// [MQTT-3.8.4-1, 4-4, 4-5, 4-6]
 	tl := len(topics)
 	subackP := make([]byte, 1, tl+7)
-	subackP[0] = SUBACK
-	subackP = VariableLengthEncode(subackP, tl+2)
+	subackP[0] = model.SUBACK
+	subackP = model.VariableLengthEncode(subackP, tl+2)
 	subackP = append(subackP, ses.packet.vh[0], ses.packet.vh[1]) // [MQTT-3.8.4-2]
 	subackP = append(subackP, qoss...)                            // [MQTT-3.9.3-1]
 
@@ -491,39 +511,8 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 	s.removeSubscriptions(c, topics)
 
 	// [MQTT-3.10.4-4, 4-5, 4-6]
-	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = UNSUBACK, 2, ses.packet.vh[0], ses.packet.vh[1]
+	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.UNSUBACK, 2, ses.packet.vh[0], ses.packet.vh[1]
 	return ses.writePacket(c.acks)
-}
-
-func VariableLengthEncode(packet []byte, l int) []byte {
-	for {
-		eb := l % 128
-		l /= 128
-		if l > 0 {
-			eb |= 128
-		}
-		packet = append(packet, byte(eb))
-		if l <= 0 {
-			break
-		}
-	}
-	return packet
-}
-
-func variableLengthEncodeNoAlloc(l int, f func(eb byte) error) error {
-	for {
-		eb := l % 128
-		l /= 128
-		if l > 0 {
-			eb |= 128
-		}
-		if err := f(byte(eb)); err != nil { // No new memory allocation
-			return err
-		}
-		if l <= 0 {
-			return nil
-		}
-	}
 }
 
 var errInvalidUTF = errors.New("invalid UTF8")

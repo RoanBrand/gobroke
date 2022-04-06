@@ -1,4 +1,4 @@
-package broker
+package gobroke
 
 import (
 	"encoding/binary"
@@ -33,6 +33,20 @@ type session struct {
 	will     model.PubMessage
 	userName string
 	password []byte
+}
+
+type packet struct {
+	controlType     uint8
+	flags           uint8
+	remainingLength uint32 // max 268,435,455 (256 MB)
+	lenMul          uint32
+
+	// Variable header
+	vhLen uint32
+	vh    []byte
+	pID   uint16 // subscribe, unsubscribe, publish with QoS>0.
+
+	payload []byte
 }
 
 func (s *session) run(retryInterval uint64) {
@@ -101,7 +115,7 @@ func (s *session) updateTimeout() {
 }
 
 func (s *session) sendPublish(i *queue.Item) error {
-	var publish byte = PUBLISH
+	var publish byte = model.PUBLISH
 	if !i.Sent.IsZero() {
 		publish |= 0x08 // set DUP if sent before
 	}
@@ -122,7 +136,7 @@ func (s *session) sendPublish(i *queue.Item) error {
 		return err
 	}
 
-	if err := variableLengthEncodeNoAlloc(rl, func(eb byte) error {
+	if err := model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
 		return s.client.tx.WriteByte(eb)
 	}); err != nil {
 		return err
@@ -165,7 +179,7 @@ func (s *session) sendPubRel(i *queue.Item) error {
 	defer s.client.txLock.Unlock()
 
 	// Header
-	if err := s.client.tx.WriteByte(PUBREL | 0x02); err != nil {
+	if err := s.client.tx.WriteByte(model.PUBREL | 0x02); err != nil {
 		return err
 	}
 	// Length
@@ -192,7 +206,7 @@ func (s *session) sendPubRel(i *queue.Item) error {
 
 // Send CONNACK with optional Session Present flag.
 func (s *session) sendConnack(errCode uint8, SP bool) error {
-	p := []byte{CONNACK, 2, 0, errCode}
+	p := []byte{model.CONNACK, 2, 0, errCode}
 	if SP {
 		p[2] = 1
 	}
