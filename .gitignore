@@ -9,5 +9,5 @@
 *.log
 
 # Binaries
-gobroke.exe
-gobroke
+/gobroke.exe
+/gobroke
