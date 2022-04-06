@@ -109,7 +109,7 @@ func (s *session) sendPublish(i *queue.Item) error {
 		publish |= 0x01
 	}
 
-	rl := len(i.P.Raw)
+	rl := len(i.P) - 1
 	if i.TxQoS > 0 {
 		rl += 2
 		publish |= i.TxQoS << 1
@@ -129,12 +129,12 @@ func (s *session) sendPublish(i *queue.Item) error {
 	}
 
 	if i.TxQoS == 0 {
-		if _, err := s.client.tx.Write(i.P.Raw); err != nil {
+		if _, err := s.client.tx.Write(i.P[1:]); err != nil {
 			return err
 		}
 	} else {
-		tLen := binary.BigEndian.Uint16(i.P.Raw)
-		if _, err := s.client.tx.Write(i.P.Raw[:2+tLen]); err != nil {
+		tLen := binary.BigEndian.Uint16(i.P[1:])
+		if _, err := s.client.tx.Write(i.P[1 : 3+tLen]); err != nil {
 			return err
 		}
 
@@ -145,7 +145,7 @@ func (s *session) sendPublish(i *queue.Item) error {
 			return err
 		}
 
-		if _, err := s.client.tx.Write(i.P.Raw[2+tLen:]); err != nil {
+		if _, err := s.client.tx.Write(i.P[3+tLen:]); err != nil {
 			return err
 		}
 	}
@@ -238,7 +238,7 @@ func (s *Server) startSession(conn net.Conn) {
 				s.removeSession(&ns)
 			}
 
-			if !graceFullExit && ns.will.Raw != nil {
+			if !graceFullExit && ns.will != nil {
 				s.pubs.Add(&queue.Item{P: ns.will})
 			}
 		}

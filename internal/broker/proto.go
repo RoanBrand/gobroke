@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/RoanBrand/gobroke/internal/model"
 	"github.com/RoanBrand/gobroke/internal/queue"
 	log "github.com/sirupsen/logrus"
 )
@@ -316,7 +317,12 @@ func (s *Server) handleConnect(ses *session) error {
 			return protocolViolation("malformed CONNECT invalid will QoS level")
 		}
 
-		ses.will = makePub(wTopicUTF8, p[offs:offs+wMsgLen], wQoS, ses.connectFlags&0x20 > 0)
+		willPubFlags := wQoS << 1
+		if ses.connectFlags&0x20 > 0 {
+			willPubFlags |= 0x01 // retain
+		}
+
+		ses.will = model.MakePub(willPubFlags, wTopicUTF8, p[offs:offs+wMsgLen])
 		offs += wMsgLen
 
 	} else if ses.connectFlags&0x38 > 0 { // [MQTT-3.1.2-11, 2-13, 2-15]
@@ -380,36 +386,36 @@ func (s *Server) handleConnect(ses *session) error {
 func (s *Server) handlePublish(ses *session) error {
 	p := &ses.packet
 	topicLen := uint32(binary.BigEndian.Uint16(p.vh))
-	qos, retain := (p.flags&0x06)>>1, p.flags&0x01 > 0
+	pub := model.MakePub(p.flags, p.vh[:topicLen+2], p.payload)
 
 	if log.IsLevelEnabled(log.DebugLevel) {
 		lf := log.Fields{
 			"client":  ses.clientId,
 			"topic":   string(p.vh[2 : topicLen+2]),
-			"QoS":     qos,
+			"QoS":     pub.RxQoS(),
 			"payload": string(p.payload),
 		}
-		if p.flags&0x08 > 0 {
+		if pub.Duplicate() {
 			lf["duplicate"] = true
 		}
-		if retain {
+		if pub.Retain() {
 			lf["retain"] = true
 		}
 		log.WithFields(lf).Debug("Got PUBLISH packet")
 	}
 
 	c := ses.client
-	switch p.flags & 0x06 {
-	case 0x00: // QoS 0
-		s.pubs.Add(&queue.Item{P: makePub(p.vh[:topicLen+2], p.payload, qos, retain)})
-	case 0x02: // QoS 1
-		s.pubs.Add(&queue.Item{P: makePub(p.vh[:topicLen+2], p.payload, qos, retain)})
+	switch pub.RxQoS() {
+	case 0:
+		s.pubs.Add(&queue.Item{P: pub})
+	case 1:
+		s.pubs.Add(&queue.Item{P: pub})
 		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBACK, 2, byte(p.pID>>8), byte(p.pID)
 		return ses.writePacket(c.acks)
-	case 0x04: // QoS 2 - [MQTT-4.3.3-2]
+	case 2: // [MQTT-4.3.3-2]
 		if _, ok := c.q2RxLookup[p.pID]; !ok {
 			c.q2RxLookup[p.pID] = struct{}{}
-			s.pubs.Add(&queue.Item{P: makePub(p.vh[:topicLen+2], p.payload, qos, retain)})
+			s.pubs.Add(&queue.Item{P: pub})
 		}
 		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = PUBREC, 2, byte(p.pID>>8), byte(p.pID)
 		return ses.writePacket(c.acks)
@@ -451,7 +457,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 	tl := len(topics)
 	subackP := make([]byte, 1, tl+7)
 	subackP[0] = SUBACK
-	subackP = variableLengthEncode(subackP, tl+2)
+	subackP = VariableLengthEncode(subackP, tl+2)
 	subackP = append(subackP, ses.packet.vh[0], ses.packet.vh[1]) // [MQTT-3.8.4-2]
 	subackP = append(subackP, qoss...)                            // [MQTT-3.9.3-1]
 
@@ -489,7 +495,7 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 	return ses.writePacket(c.acks)
 }
 
-func variableLengthEncode(packet []byte, l int) []byte {
+func VariableLengthEncode(packet []byte, l int) []byte {
 	for {
 		eb := l % 128
 		l /= 128

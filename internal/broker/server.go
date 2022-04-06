@@ -255,15 +255,6 @@ func (s *Server) removeSession(ses *session) {
 	delete(s.clients, ses.clientId)
 }
 
-func makePub(topicUTF8, payload []byte, qos uint8, retain bool) (p model.PubMessage) {
-	p.Raw = make([]byte, 0, len(topicUTF8)+len(payload))
-	p.Raw = append(p.Raw, topicUTF8...)
-	p.Raw = append(p.Raw, payload...)
-	p.RxQoS = qos
-	p.Retain = retain
-	return
-}
-
 type topicLevel struct {
 	children    topicTree
 	subscribers map[*client]uint8 // client -> QoS level
@@ -340,7 +331,7 @@ func (s *Server) addSubscriptions(c *client, topics [][]string, qoss []uint8) {
 
 		// Retained messages
 		forwardLevel := func(l *retainLevel) {
-			if l.p.Raw != nil {
+			if l.p != nil {
 				c.processPub(l.p, qoss[i], true)
 			}
 		}
@@ -440,8 +431,8 @@ func (s *Server) forwardToSubscribers(tl *topicLevel, p model.PubMessage) {
 // Match published message topic to all subscribers, and forward.
 // Also store pub if retained message.
 func (s *Server) matchSubscriptions(p model.PubMessage) {
-	tLen := int(binary.BigEndian.Uint16(p.Raw))
-	topic := strings.Split(string(p.Raw[2:2+tLen]), "/")
+	tLen := int(binary.BigEndian.Uint16(p[1:]))
+	topic := strings.Split(string(p[3:3+tLen]), "/")
 
 	var matchLevel func(topicTree, int)
 	matchLevel = func(l topicTree, n int) {
@@ -480,7 +471,7 @@ func (s *Server) matchSubscriptions(p model.PubMessage) {
 
 	matchLevel(s.subscriptions, 0)
 
-	if !p.Retain {
+	if !p.Retain() {
 		return
 	}
 
@@ -496,9 +487,9 @@ func (s *Server) matchSubscriptions(p model.PubMessage) {
 		tr = nl.children
 	}
 
-	if len(p.Raw) == 2+tLen {
+	if len(p) == 3+tLen {
 		// payload empty, so delete existing retained message
-		nl.p.Raw = nil
+		nl.p = nil
 	} else {
 		nl.p = p
 	}

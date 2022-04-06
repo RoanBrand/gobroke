@@ -75,8 +75,8 @@ func (c *client) replaceSession(s *session) {
 }
 
 func (c *client) processPub(p model.PubMessage, maxQoS uint8, retained bool) {
-	finalQoS := p.RxQoS
-	if maxQoS < p.RxQoS {
+	finalQoS := p.RxQoS()
+	if maxQoS < finalQoS {
 		finalQoS = maxQoS
 	}
 

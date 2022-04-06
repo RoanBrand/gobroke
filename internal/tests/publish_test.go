@@ -638,7 +638,8 @@ func BenchmarkPubs(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	err = c1.sub("t", qos)
+	topic := "t"
+	err = c1.sub(topic, qos)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -696,7 +697,7 @@ func BenchmarkPubs(b *testing.B) {
 			if qos > 0 {
 				<-limiter
 			}
-			if err := c2.pubMsg(msg, "t", qos, func(complete bool, pID uint16) {
+			if err := c2.pubMsg(msg, topic, qos, func(complete bool, pID uint16) {
 				switch qos {
 				case 1:
 					if !complete { // not puback

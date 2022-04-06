@@ -411,13 +411,15 @@ func (c *fakeClient) pubMsgRaw(msg []byte, topic string, qos uint8, pubID uint16
 		}
 		c.qL.Unlock()
 	}
-	pacLen := uint8(2 + len(topic) + len(msg))
+	pacLen := 2 + len(topic) + len(msg)
 	if qos > 0 {
 		pacLen += 2
 	}
 
 	c.workBuf = c.workBuf[:0]
-	c.workBuf = append(c.workBuf, broker.PUBLISH, pacLen, 0, uint8(len(topic)))
+	c.workBuf = append(c.workBuf, broker.PUBLISH)
+	c.workBuf = broker.VariableLengthEncode(c.workBuf, pacLen)
+	c.workBuf = append(c.workBuf, uint8(len(topic)>>8), uint8(len(topic)))
 	c.workBuf = append(c.workBuf, []byte(topic)...)
 	if qos > 0 {
 		c.workBuf = append(c.workBuf, uint8(pubID>>8), uint8(pubID))
@@ -440,7 +442,9 @@ func (c *fakeClient) pubMsgRaw(msg []byte, topic string, qos uint8, pubID uint16
 
 func (c *fakeClient) sub(topic string, qos uint8) error {
 	pId := <-c.pIDs
-	b := []byte{broker.SUBSCRIBE | 2, 5 + uint8(len(topic)), uint8(pId >> 8), uint8(pId), 0, uint8(len(topic))}
+	b := []byte{broker.SUBSCRIBE | 2}
+	b = broker.VariableLengthEncode(b, len(topic)+5)
+	b = append(b, uint8(pId>>8), uint8(pId), uint8(len(topic)>>8), uint8(len(topic)))
 	b = append(b, []byte(topic)...)
 	b = append(b, qos)
 	err := c.writePacket(b)
@@ -456,6 +460,7 @@ func (c *fakeClient) sub(topic string, qos uint8) error {
 		if sInfo.qos != qos {
 			return fmt.Errorf("suback error. QoS is: %v Must be: %v", sInfo.qos, 1)
 		}
+		c.pIDs <- pId
 	case <-c.dead:
 		return errors.New("client stopped. server most likely closed connection")
 	case <-time.After(time.Second):

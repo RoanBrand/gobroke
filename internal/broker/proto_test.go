@@ -6,20 +6,20 @@ func TestVariableLengthEncoding(t *testing.T) {
 	t.Parallel()
 
 	l := 0
-	ve := variableLengthEncode([]byte{}, l)
+	ve := VariableLengthEncode([]byte{}, l)
 	if len(ve) != 1 || ve[0] != 0 {
 		t.Fatal(l)
 	}
 
 	l = 127
-	ve = variableLengthEncode(ve[:0], l)
+	ve = VariableLengthEncode(ve[:0], l)
 	if len(ve) != 1 || ve[0] != 127 {
 		t.Fatal(l)
 	}
 
 	l = 128
 	e := []byte{0x80, 0x01, 0, 0}
-	ve = variableLengthEncode(ve[:0], l)
+	ve = VariableLengthEncode(ve[:0], l)
 	if len(ve) != 2 {
 		t.Fatal(l)
 	}
@@ -31,7 +31,7 @@ func TestVariableLengthEncoding(t *testing.T) {
 
 	l = 16383
 	e[0], e[1] = 0xFF, 0x7F
-	ve = variableLengthEncode(ve[:0], l)
+	ve = VariableLengthEncode(ve[:0], l)
 	if len(ve) != 2 {
 		t.Fatal(l)
 	}
@@ -43,7 +43,7 @@ func TestVariableLengthEncoding(t *testing.T) {
 
 	l = 16384
 	e[0], e[1], e[2] = 0x80, 0x80, 0x01
-	ve = variableLengthEncode(ve[:0], l)
+	ve = VariableLengthEncode(ve[:0], l)
 	if len(ve) != 3 {
 		t.Fatal(l)
 	}
@@ -55,7 +55,7 @@ func TestVariableLengthEncoding(t *testing.T) {
 
 	l = 2097151
 	e[0], e[1], e[2] = 0xFF, 0xFF, 0x7F
-	ve = variableLengthEncode(ve[:0], l)
+	ve = VariableLengthEncode(ve[:0], l)
 	if len(ve) != 3 {
 		t.Fatal(l)
 	}
@@ -67,7 +67,7 @@ func TestVariableLengthEncoding(t *testing.T) {
 
 	l = 2097152
 	e[0], e[1], e[2], e[3] = 0x80, 0x80, 0x80, 0x01
-	ve = variableLengthEncode(ve[:0], l)
+	ve = VariableLengthEncode(ve[:0], l)
 	if len(ve) != 4 {
 		t.Fatal(l)
 	}
@@ -79,7 +79,7 @@ func TestVariableLengthEncoding(t *testing.T) {
 
 	l = 268435455
 	e[0], e[1], e[2], e[3] = 0xFF, 0xFF, 0xFF, 0x7F
-	ve = variableLengthEncode(ve[:0], l)
+	ve = VariableLengthEncode(ve[:0], l)
 	if len(ve) != 4 {
 		t.Fatal(l)
 	}
