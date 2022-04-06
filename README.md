@@ -23,13 +23,14 @@ It blocks while service is running until `s.Stop()` is called, where it returns 
 s := gobroke.Server{}
 s.TCP.Address = ""
 s.TLS.Address = ":8883"
-s.TLS.Certificate = "certs/example.crt"
-s.TLS.Certificate = "certs/example.key"
+s.TLS.Cert = "certs/example.crt"
+s.TLS.Key = "certs/example.key"
 s.WS.Address = ":8080"
 
 s.Run()
 ```
-You can configure network protocols TCP, TLS, Websocket, and Secure Websocket (WSS). Setting the `Address` field to `""` disables the network protocol and listener.  
+You can configure network protocols TCP, TLS, Websocket, and Secure Websocket (WSS).  
+Setting the `Address` field to `""` disables the network protocol and listener.  
 If all addresses are blank, or no config is provided, the server will default to using just TCP ":1883"
 
 ## OS Service (Standalone Build)
