@@ -587,10 +587,6 @@ func BenchmarkPubs(b *testing.B) {
 
 	errs := make(chan error, 1)
 	s := gobroke.Server{}
-	/*s, err := gobroke.New("../../config.json")
-	if err != nil {
-		b.Fatal(err)
-	}*/
 	defer s.Stop()
 	go func() {
 		if err := s.Run(); err != nil {

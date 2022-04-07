@@ -1,5 +1,5 @@
 # gobroke
-My own implementation of MQTT v3.1.1 server. Advanced and free to use.
+My own implementation of MQTT server. Advanced and free to use.
 
 ## Installation
 ```bash
@@ -15,8 +15,8 @@ if err != nil {
 	panic(err)
 }
 ```
-`s.Run()` starts a MQTT broker listening on TCP port 1883.  
-It blocks while service is running until `s.Stop()` is called, where it returns `nil`, or it crashes for some reason.
+* `s.Run()` starts a MQTT broker listening on TCP port 1883.
+* It blocks while service is running until `s.Stop()` is called, where it returns `nil`, or it crashes for some reason.
 
 ## Extended Configuration
 ```go
@@ -29,9 +29,10 @@ s.WS.Address = ":8080"
 
 s.Run()
 ```
-You can configure network protocols TCP, TLS, Websocket, and Secure Websocket (WSS).  
-Setting the `Address` field to `""` disables the network protocol and listener.  
-If all addresses are blank, or no config is provided, the server will default to using just TCP ":1883"
+* You can configure network protocols TCP, TLS, Websocket, and Secure Websocket (WSS).
+* Setting the `Address` field to `""` disables the network protocol and listener.
+* If all addresses are blank, or no config is provided, the server will default to using just TCP ":1883"
+* See `internal/config/config.go` for all options.
 
 ## OS Service (Standalone Build)
 * The service can be built into a standalone server binary executable by running `make build`
@@ -39,8 +40,6 @@ If all addresses are blank, or no config is provided, the server will default to
 * Service can then be started with `gobroke -service start` or from the OS Service Manager
 * The config file can be omitted, in which case the server will just listen on TCP ":1883"
 
-##### Configuration
-* See `internal/config/config.go` for all options.
 * Example JSON config file for standalone server:
 ```javascript
 {

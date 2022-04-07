@@ -60,7 +60,7 @@ func main() {
 
 	// Set defaults before config override.
 	if service.Interactive() {
-		log.SetLevel(log.DebugLevel)
+		log.SetLevel(log.InfoLevel)
 	} else {
 		f, err := os.OpenFile(filepath.Join(eDir, "gobroke.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
@@ -73,7 +73,7 @@ func main() {
 	svcConfig := service.Config{
 		Name:        "gobroke",
 		DisplayName: "gobroke MQTT server",
-		Description: "gobroke MQTT v3.1.1 server. See https://github.com/RoanBrand/gobroke",
+		Description: "gobroke MQTT server. See https://github.com/RoanBrand/gobroke",
 	}
 
 	s, err := service.New(&prg, &svcConfig)

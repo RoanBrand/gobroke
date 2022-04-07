@@ -101,7 +101,7 @@ func (c *client) processPub(p model.PubMessage, maxQoS uint8, retained bool) {
 func (c *client) qos1Done(pID uint16) {
 	if c.q1.Remove(pID) == nil {
 		log.WithFields(log.Fields{
-			"client":   c.session.clientId,
+			"clientId": c.session.clientId,
 			"packetID": pID,
 		}).Error("Got PUBACK packet for none existing packet")
 		return
@@ -110,23 +110,24 @@ func (c *client) qos1Done(pID uint16) {
 	c.pIDs <- pID
 }
 
-func (c *client) qos2Part1Done(pID uint16) {
+func (c *client) qos2Part1Done(pID uint16) bool {
 	i := c.q2.Remove(pID)
 	if i == nil {
 		log.WithFields(log.Fields{
-			"client":   c.session.clientId,
+			"clientId": c.session.clientId,
 			"packetID": pID,
 		}).Error("Got PUBREC packet for none existing packet")
-		return
+		return false
 	}
 
 	c.q2Stage2.Add(i)
+	return true
 }
 
 func (c *client) qos2Part2Done(pID uint16) {
 	if c.q2Stage2.Remove(pID) == nil {
 		log.WithFields(log.Fields{
-			"client":   c.session.clientId,
+			"clientId": c.session.clientId,
 			"packetID": pID,
 		}).Error("Got PUBCOMP packet for none existing packet")
 		return

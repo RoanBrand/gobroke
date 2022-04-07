@@ -29,6 +29,7 @@ type session struct {
 	connectSent  bool
 	connectFlags byte
 	keepAlive    time.Duration
+	protoVersion uint8
 
 	will     model.PubMessage
 	userName string
@@ -56,20 +57,20 @@ func (s *session) run(retryInterval uint64) {
 
 	if err := c.q2Stage2.ResendAll(s.sendPubRel); err != nil {
 		log.WithFields(log.Fields{
-			"client": s.clientId,
-			"err":    err,
+			"clientId": s.clientId,
+			"err":      err,
 		}).Error("Unable to resend all pending QoS2 PUBRELs")
 	}
 	if err := c.q2.ResendAll(s.sendPublish); err != nil {
 		log.WithFields(log.Fields{
-			"client": s.clientId,
-			"err":    err,
+			"clientId": s.clientId,
+			"err":      err,
 		}).Error("Unable to resend all pending QoS2 PUBLISHs")
 	}
 	if err := c.q1.ResendAll(s.sendPublish); err != nil {
 		log.WithFields(log.Fields{
-			"client": s.clientId,
-			"err":    err,
+			"clientId": s.clientId,
+			"err":      err,
 		}).Error("Unable to resend all pending QoS1 PUBLISHs")
 	}
 
@@ -175,11 +176,16 @@ func (s *session) sendPublish(i *queue.Item) error {
 }
 
 func (s *session) sendPubRel(i *queue.Item) error {
+	var pubrel byte = model.PUBREL | 0x02
+	if s.protoVersion == 3 && !i.Sent.IsZero() {
+		pubrel |= 0x08 // set DUP if sent before
+	}
+
 	s.client.txLock.Lock()
 	defer s.client.txLock.Unlock()
 
 	// Header
-	if err := s.client.tx.WriteByte(model.PUBREL | 0x02); err != nil {
+	if err := s.client.tx.WriteByte(pubrel); err != nil {
 		return err
 	}
 	// Length
@@ -274,7 +280,7 @@ func (s *Server) startSession(conn net.Conn) {
 			// KeepAlive timeout
 			if strings.Contains(errStr, "i/o timeout") {
 				l := log.WithFields(log.Fields{
-					"client": ns.clientId,
+					"clientId": ns.clientId,
 				})
 				if ns.connectSent {
 					l.Debug("KeepAlive timeout. Dropping connection")
@@ -285,8 +291,8 @@ func (s *Server) startSession(conn net.Conn) {
 			}
 
 			log.WithFields(log.Fields{
-				"client": ns.clientId,
-				"err":    err,
+				"clientId": ns.clientId,
+				"err":      err,
 			}).Error("TCP RX error")
 			return
 		}
@@ -297,8 +303,8 @@ func (s *Server) startSession(conn net.Conn) {
 					graceFullExit = true
 				} else {
 					log.WithFields(log.Fields{
-						"client": ns.clientId,
-						"err":    err,
+						"clientId": ns.clientId,
+						"err":      err,
 					}).Error("RX stream packet parse error")
 				}
 				return
@@ -323,8 +329,8 @@ func (s *session) startWriter() {
 					return
 				}
 				log.WithFields(log.Fields{
-					"client": s.clientId,
-					"err":    err,
+					"clientId": s.clientId,
+					"err":      err,
 				}).Error("TCP TX error")
 				return
 			}

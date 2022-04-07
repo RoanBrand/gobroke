@@ -128,7 +128,6 @@ func testConnect(t *testing.T) {
 	protoErr = errors.New("The Server MUST respond to the CONNECT Packet with a CONNACK return code 0x01 (unacceptable protocol level) and then disconnect the Client if the Protocol Level is not supported by the Server [MQTT-3.1.2-2]")
 
 	c = newClient("", errs)
-	// t.Log("protocol version must be 4 (MQTTv3.1.1)", c.ClientID)
 	if err := c.dialOnly(); err != nil {
 		t.Fatal(err)
 	}

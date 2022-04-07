@@ -152,6 +152,14 @@ func (q *QoS2Part2) Remove(id uint16) *Item {
 	return nil
 }
 
+// Present checks if QoS2 msg in stage 2 of transmission.
+func (q *QoS2Part2) Present(id uint16) bool {
+	q.Lock()
+	_, ok := q.lookup[id]
+	q.Unlock()
+	return ok
+}
+
 // NotifyDispatcher will signal dispatcher to check the queue.
 func (q *Basic) NotifyDispatcher() {
 	q.trig.Signal()

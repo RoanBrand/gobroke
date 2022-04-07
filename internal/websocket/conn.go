@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	log "github.com/sirupsen/logrus"
 )
 
 var dispatch func(net.Conn)
@@ -41,15 +40,13 @@ func handler(checkOrigin bool) func(w http.ResponseWriter, r *http.Request) {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		if protos := websocket.Subprotocols(r); len(protos) == 0 || protos[0] != "mqtt" { // [MQTT-6.0.0-3]
-			errMsg := "websocket client not supported. Must be MQTT v3.1.1"
-			log.Debug(errMsg, " Client sub protocols:", protos)
+			errMsg := "websocket client not supported. sub protocol must be 'mqtt'"
 			http.Error(w, errMsg, http.StatusNotAcceptable)
 			return
 		}
 		conn, err := up.Upgrade(w, r, nil)
 		if err != nil {
 			errMsg := "unsuccessful websocket negotiation: " + err.Error()
-			log.Debug(errMsg)
 			http.Error(w, errMsg, http.StatusInternalServerError)
 			return
 		}
