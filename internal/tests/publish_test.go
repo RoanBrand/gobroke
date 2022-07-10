@@ -192,6 +192,7 @@ func testQoS1(t *testing.T) {
 				errs <- fmt.Errorf("expecting puback for pID %d, got for %d", f1, pID)
 				return
 			}
+
 			if f1 == count {
 				close(done)
 			} else {
@@ -210,6 +211,7 @@ func testQoS1(t *testing.T) {
 			if pub.qos != 1 || pub.topic != topic || !bytes.Equal(pub.msg, msg) || pub.dup || pub.pID != uint16(i) {
 				t.Fatal(pub)
 			}
+
 			if i%2 == 0 {
 				if err = c1.sendPuback(uint16(i)); err != nil {
 					t.Fatal(err)
@@ -227,7 +229,7 @@ func testQoS1(t *testing.T) {
 	default:
 	}
 
-	if err = c1.stop(); err != nil {
+	if err = c1.stop(true); err != nil {
 		t.Fatal(err)
 	}
 	c1, err = dial(c1.ClientID, false, 1, errs)
@@ -258,7 +260,7 @@ func testQoS1(t *testing.T) {
 	default:
 	}
 
-	if err = c1.stop(); err != nil {
+	if err = c1.stop(true); err != nil {
 		t.Fatal(err)
 	}
 	c1, err = dial(c1.ClientID, false, 1, errs)
@@ -422,10 +424,10 @@ func testQoS2(t *testing.T) {
 	}
 
 	// New C1 & C2
-	if err = c1.stop(); err != nil {
+	if err = c1.stop(true); err != nil {
 		t.Fatal(err)
 	}
-	if err = c2.stop(); err != nil {
+	if err = c2.stop(true); err != nil {
 		t.Fatal(err)
 	}
 	err = c1.connect(false, 1)
@@ -527,7 +529,7 @@ func testQoS2(t *testing.T) {
 	}
 
 	// New C1
-	if err = c1.stop(); err != nil {
+	if err = c1.stop(true); err != nil {
 		t.Fatal(err)
 	}
 	err = c1.connect(false, 1)
@@ -561,7 +563,7 @@ func testQoS2(t *testing.T) {
 	}
 
 	// New C1
-	if err = c1.stop(); err != nil {
+	if err = c1.stop(true); err != nil {
 		t.Fatal(err)
 	}
 	err = c1.connect(false, 1)
@@ -727,6 +729,6 @@ func BenchmarkPubs(b *testing.B) {
 	b.StopTimer()
 	b.ReportAllocs()
 
-	c1.stop()
-	c2.stop()
+	c1.stop(true)
+	c2.stop(true)
 }

@@ -371,23 +371,20 @@ func (c *fakeClient) connect(cleanSes bool, expectSp uint8) error {
 	return nil
 }
 
-func (c *fakeClient) stop() error {
-	if err := c.sendDisconnect(); err != nil {
-		return err
-	}
-	atomic.StoreInt32(&c.toKill, 1)
-	if err := c.conn.Close(); err != nil {
-		return err
+func (c *fakeClient) stop(sendDisconnect bool) error {
+	if sendDisconnect {
+		if err := c.sendDisconnect(); err != nil {
+			return err
+		}
 	}
 
-	c.txLock.Lock()
+	atomic.StoreInt32(&c.toKill, 1)
 	if len(c.txFlush) == 0 {
 		select {
 		case c.txFlush <- struct{}{}:
 		default:
 		}
 	}
-	c.txLock.Unlock()
 
 	c.wg.Wait()
 	return nil
@@ -515,6 +512,7 @@ func (c *fakeClient) writePacket(p []byte) error {
 		c.txLock.Unlock()
 		return err
 	}
+	c.txLock.Unlock()
 
 	if len(c.txFlush) == 0 {
 		select {
@@ -522,8 +520,6 @@ func (c *fakeClient) writePacket(p []byte) error {
 		default:
 		}
 	}
-
-	c.txLock.Unlock()
 	return nil
 }
 
@@ -531,22 +527,25 @@ func (c *fakeClient) startWriter() {
 	defer c.wg.Done()
 	for range c.txFlush {
 		c.txLock.Lock()
-		if atomic.LoadInt32(&c.toKill) == 1 {
-			c.txLock.Unlock()
-			return
-		}
 
 		if c.tx.Buffered() > 0 {
 			if err := c.tx.Flush(); err != nil {
+				c.txLock.Unlock()
 				if strings.Contains(err.Error(), "use of closed") {
-					c.txLock.Unlock()
 					return
 				}
-				c.txLock.Unlock()
 				c.errs <- err
 				return
 			}
 		}
+		if atomic.LoadInt32(&c.toKill) == 1 {
+			c.txLock.Unlock()
+			if err := c.conn.Close(); err != nil {
+				c.errs <- err
+			}
+			return
+		}
+
 		c.txLock.Unlock()
 	}
 }

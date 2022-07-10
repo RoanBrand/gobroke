@@ -93,14 +93,12 @@ func (s *session) stop() {
 		close(s.dead2)
 		s.conn.Close()
 		if c := s.client; c != nil {
-			c.txLock.Lock()
 			if len(c.txFlush) == 0 {
 				select {
 				case c.txFlush <- struct{}{}:
 				default:
 				}
 			}
-			c.txLock.Unlock()
 			c.q0.NotifyDispatcher()
 			c.q1.NotifyDispatcher()
 			c.q2.NotifyDispatcher()

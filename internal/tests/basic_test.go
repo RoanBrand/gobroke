@@ -25,7 +25,7 @@ func testRejoin(t *testing.T) {
 		}
 
 		if oldC1 != nil { // prevent reaching max connections on system
-			oldC1.conn.Close()
+			oldC1.stop(false)
 			oldC1 = nil
 		}
 
@@ -42,7 +42,7 @@ func testRejoin(t *testing.T) {
 		sp2 = 1
 
 		if oldC2 != nil {
-			oldC2.conn.Close()
+			oldC2.stop(false)
 			oldC2 = nil
 		}
 
@@ -66,7 +66,7 @@ func testRejoin(t *testing.T) {
 		c1PubReadId++
 
 		if i%2 == 0 {
-			c1.conn.Close()
+			c1.stop(false)
 		} else {
 			oldC1 = c1
 		}
@@ -76,7 +76,7 @@ func testRejoin(t *testing.T) {
 			t.Fatal(err)
 		}
 		if oldC1 != nil {
-			oldC1.conn.Close()
+			oldC1.stop(false)
 			oldC1 = nil
 		}
 
