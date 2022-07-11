@@ -1,8 +1,8 @@
 package queue
 
 import (
+	"context"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -107,7 +107,7 @@ func (q *Basic) Add(i *Item) {
 func (q *QoS12) Add(i *Item) {
 	q.Lock()
 	q.add(i)
-	q.lookup[i.PId] = i
+	//q.lookup[i.PId] = i
 	if q.toSend == nil {
 		q.toSend = i
 	}
@@ -166,7 +166,7 @@ func (q *Basic) NotifyDispatcher() {
 }
 
 // StartDispatcher will continuously dispatch queue items and remove them.
-func (q *Basic) StartDispatcher(d func(*Item) error, killed *int32, wg *sync.WaitGroup) {
+func (q *Basic) StartDispatcher(ctx context.Context, d func(*Item) error, wg *sync.WaitGroup) {
 	defer func() {
 		if wg != nil {
 			wg.Done()
@@ -174,16 +174,19 @@ func (q *Basic) StartDispatcher(d func(*Item) error, killed *int32, wg *sync.Wai
 	}()
 	for {
 		q.Lock()
-		if killed != nil && atomic.LoadInt32(killed) == 1 {
+
+		if ctx.Err() != nil {
 			q.Unlock()
 			return
 		}
+
 		if q.h == nil {
 			q.trig.Wait()
-		}
-		if killed != nil && atomic.LoadInt32(killed) == 1 {
-			q.Unlock()
-			return
+
+			if ctx.Err() != nil {
+				q.Unlock()
+				return
+			}
 		}
 
 		i := q.h
@@ -196,6 +199,7 @@ func (q *Basic) StartDispatcher(d func(*Item) error, killed *int32, wg *sync.Wai
 				q.h.prev = nil
 			}
 		}
+
 		q.Unlock()
 
 		if i != nil {
@@ -207,31 +211,39 @@ func (q *Basic) StartDispatcher(d func(*Item) error, killed *int32, wg *sync.Wai
 }
 
 // StartDispatcher will continuously dispatch new, previously undispatched queue items. Doesn't remove them.
-func (q *QoS12) StartDispatcher(d func(*Item) error, killed *int32, wg *sync.WaitGroup) {
-	defer func() {
-		wg.Done()
-	}()
+func (q *QoS12) StartDispatcher(ctx context.Context, d func(*Item) error, getPId func() uint16, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	for {
 		q.Lock()
-		if atomic.LoadInt32(killed) == 1 {
+
+		if ctx.Err() != nil {
 			q.Unlock()
 			return
 		}
+
 		if q.toSend == nil {
 			q.trig.Wait()
-		}
-		if atomic.LoadInt32(killed) == 1 {
-			q.Unlock()
-			return
+
+			if ctx.Err() != nil {
+				q.Unlock()
+				return
+			}
 		}
 
 		i := q.toSend
 		if i != nil {
 			q.toSend = i.next
 		}
+
 		q.Unlock()
 
 		if i != nil {
+			i.PId = getPId()
+			q.Lock()
+			q.lookup[i.PId] = i
+			q.Unlock()
+
 			if err := d(i); err != nil {
 				return
 			}
@@ -241,7 +253,7 @@ func (q *QoS12) StartDispatcher(d func(*Item) error, killed *int32, wg *sync.Wai
 }
 
 // Resend pending/unacknowledged QoS 1 & 2 messages after timeout.
-func (q *queue) monitorTimeouts(toMS uint64, killed chan struct{}, timedOut func(*Item) error) {
+func (q *queue) monitorTimeouts(ctx context.Context, toMS uint64, timedOut func(*Item) error) {
 	timeout := time.Millisecond * time.Duration(toMS)
 	t := time.NewTimer(timeout)
 	defer func() {
@@ -250,9 +262,10 @@ func (q *queue) monitorTimeouts(toMS uint64, killed chan struct{}, timedOut func
 		}
 	}()
 
+	done := ctx.Done()
 	for {
 		select {
-		case <-killed:
+		case <-done:
 			return
 		case now := <-t.C:
 			nextRun := timeout
@@ -284,16 +297,16 @@ func (q *queue) monitorTimeouts(toMS uint64, killed chan struct{}, timedOut func
 }
 
 // Resend pending/unacknowledged QoS 1 & 2 PUBLISHs after timeout.
-func (q *QoS12) MonitorTimeouts(toMS uint64, d func(*Item) error, killed chan struct{}, wg *sync.WaitGroup) {
-	q.queue.monitorTimeouts(toMS, killed, func(i *Item) error {
+func (q *QoS12) MonitorTimeouts(ctx context.Context, toMS uint64, d func(*Item) error, wg *sync.WaitGroup) {
+	q.queue.monitorTimeouts(ctx, toMS, func(i *Item) error {
 		return d(i)
 	})
 	wg.Done()
 }
 
 // Resend pending/unacknowledged QoS 2 PUBRELs after timeout.
-func (q *QoS2Part2) MonitorTimeouts(toMS uint64, d func(*Item) error, killed chan struct{}, wg *sync.WaitGroup) {
-	q.queue.monitorTimeouts(toMS, killed, func(i *Item) error {
+func (q *QoS2Part2) MonitorTimeouts(ctx context.Context, toMS uint64, d func(*Item) error, wg *sync.WaitGroup) {
+	q.queue.monitorTimeouts(ctx, toMS, func(i *Item) error {
 		return d(i)
 	})
 	wg.Done()
@@ -303,13 +316,16 @@ func (q *QoS2Part2) MonitorTimeouts(toMS uint64, d func(*Item) error, killed cha
 func (q *QoS12) ResendAll(d func(*Item) error) error {
 	q.Lock()
 	for i := q.h; i != nil; i = i.next {
+		if i.PId == 0 {
+			break
+		}
 		if err := d(i); err != nil {
 			q.Unlock()
 			return err
 		}
 
-		q.toSend = i.next
 		i.Sent = time.Now()
+		q.toSend = i.next
 	}
 	q.Unlock()
 	return nil

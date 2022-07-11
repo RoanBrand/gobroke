@@ -2,4 +2,4 @@ build:
 	go build cmd/gobroke/gobroke.go
 
 test:
-	go test ./... -timeout 30s -race -v
+	go test ./... -count=1 -timeout 20s -race -v

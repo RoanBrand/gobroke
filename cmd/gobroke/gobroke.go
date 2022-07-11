@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"os"
 	"path/filepath"
@@ -35,7 +36,7 @@ func (p *program) Start(s service.Service) error {
 	}
 
 	go func() {
-		if err := p.server.Run(); err != nil {
+		if err := p.server.Run(context.Background()); err != nil {
 			log.Fatal(err)
 		}
 	}()
@@ -60,7 +61,7 @@ func main() {
 
 	// Set defaults before config override.
 	if service.Interactive() {
-		log.SetLevel(log.InfoLevel)
+		log.SetLevel(log.DebugLevel)
 	} else {
 		f, err := os.OpenFile(filepath.Join(eDir, "gobroke.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {

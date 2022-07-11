@@ -1,6 +1,7 @@
 package websocket
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -10,27 +11,62 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var dispatch func(net.Conn)
-
-func SetDispatcher(d func(net.Conn)) {
-	dispatch = d
+type WS struct {
+	h        http.Server
+	dispatch func(net.Conn)
+	err      error
 }
 
-func Setup(address string, checkOrigin bool, errs chan error) error {
-	go func() {
-		errs <- http.ListenAndServe(address, http.HandlerFunc(handler(checkOrigin)))
-	}()
-	return nil
+func (ws *WS) Run(ctx context.Context, address string, checkOrigin bool, dispatch func(net.Conn)) {
+	if len(address) == 0 {
+		return
+	}
+
+	ws.setup(ctx, address, checkOrigin, dispatch)
+	go func(ws *WS) {
+		err := ws.h.ListenAndServe()
+		if err != nil && err != http.ErrServerClosed {
+			ws.err = err
+		}
+	}(ws)
 }
 
-func SetupTLS(address, certFile, keyFile string, checkOrigin bool, errs chan error) error {
-	go func() {
-		errs <- http.ListenAndServeTLS(address, certFile, keyFile, http.HandlerFunc(handler(checkOrigin)))
-	}()
-	return nil
+func (ws *WS) RunTLS(ctx context.Context, address, certFile, keyFile string, checkOrigin bool, dispatch func(net.Conn)) {
+	if len(address) == 0 {
+		return
+	}
+
+	ws.setup(ctx, address, checkOrigin, dispatch)
+	go func(ws *WS) {
+		err := ws.h.ListenAndServeTLS(certFile, keyFile)
+		if err != nil && err != http.ErrServerClosed {
+			ws.err = err
+		}
+	}(ws)
 }
 
-func handler(checkOrigin bool) func(w http.ResponseWriter, r *http.Request) {
+func (ws *WS) Stop() error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+
+	err := ws.h.Shutdown(ctx)
+	if err != nil && err != http.ErrServerClosed {
+		return err
+	}
+
+	return ws.err
+}
+
+func (ws *WS) setup(ctx context.Context, address string, checkOrigin bool, dispatch func(net.Conn)) {
+	ws.h.BaseContext = func(l net.Listener) context.Context {
+		return ctx
+	}
+	ws.h.Addr = address
+	ws.dispatch = dispatch
+	ws.h.Handler = http.HandlerFunc(ws.handler(checkOrigin))
+}
+
+func (ws *WS) handler(checkOrigin bool) func(w http.ResponseWriter, r *http.Request) {
 	up := websocket.Upgrader{
 		Subprotocols: []string{"mqtt"}, // [MQTT-6.0.0-4]
 	}
@@ -44,6 +80,7 @@ func handler(checkOrigin bool) func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, errMsg, http.StatusNotAcceptable)
 			return
 		}
+
 		conn, err := up.Upgrade(w, r, nil)
 		if err != nil {
 			errMsg := "unsuccessful websocket negotiation: " + err.Error()
@@ -51,7 +88,7 @@ func handler(checkOrigin bool) func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		go dispatch(&wsConn{Conn: conn})
+		go ws.dispatch(&wsConn{Conn: conn})
 	}
 }
 

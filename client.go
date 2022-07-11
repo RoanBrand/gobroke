@@ -30,8 +30,8 @@ type client struct {
 func newClient(ses *session) *client {
 	c := client{
 		session:       ses,
-		subscriptions: make(topT, 4),
-		pIDs:          make(chan uint16, 65536),
+		subscriptions: make(topT),
+		pIDs:          make(chan uint16, 65535),
 		acks:          make([]byte, 4),
 		tx:            bufio.NewWriter(ses.conn),
 		txFlush:       make(chan struct{}, 1),
@@ -74,6 +74,15 @@ func (c *client) replaceSession(s *session) {
 	c.session = s
 }
 
+func (c *client) notifyFlusher() {
+	if len(c.txFlush) == 0 {
+		select {
+		case c.txFlush <- struct{}{}:
+		default:
+		}
+	}
+}
+
 func (c *client) processPub(p model.PubMessage, maxQoS uint8, retained bool) {
 	finalQoS := p.RxQoS()
 	if maxQoS < finalQoS {
@@ -81,20 +90,13 @@ func (c *client) processPub(p model.PubMessage, maxQoS uint8, retained bool) {
 	}
 
 	i := &queue.Item{P: p, TxQoS: finalQoS, Retained: retained}
-
-	if finalQoS == 0 {
+	switch finalQoS {
+	case 0:
 		c.q0.Add(i)
-	} else {
-		select {
-		case pID := <-c.pIDs:
-			i.PId = pID
-			if finalQoS == 1 {
-				c.q1.Add(i)
-			} else {
-				c.q2.Add(i)
-			}
-		default: // TODO: queue messages anyway and assign IDs later as they become available?
-		}
+	case 1:
+		c.q1.Add(i)
+	case 2:
+		c.q2.Add(i)
 	}
 }
 
