@@ -1,11 +1,12 @@
 package gobroke
 
 import (
+	"context"
 	"encoding/binary"
+	"errors"
 	"net"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/RoanBrand/gobroke/internal/model"
@@ -15,13 +16,13 @@ import (
 
 type session struct {
 	client *client
+	conn   net.Conn
 
-	conn    net.Conn
 	packet  packet
 	rxState uint8
 
-	dead     int32
-	dead2    chan struct{}
+	ctx      context.Context
+	cancel   context.CancelFunc
 	onlyOnce sync.Once
 	stopped  sync.WaitGroup
 
@@ -75,36 +76,34 @@ func (s *session) run(retryInterval uint64) {
 	}
 
 	s.stopped.Add(3)
-	go c.q0.StartDispatcher(s.sendPublish, &s.dead, &s.stopped)
-	go c.q1.StartDispatcher(s.sendPublish, &s.dead, &s.stopped)
-	go c.q2.StartDispatcher(s.sendPublish, &s.dead, &s.stopped)
+	go c.q0.StartDispatcher(s.ctx, s.sendPublish, &s.stopped)
+	go c.q1.StartDispatcher(s.ctx, s.sendPublish, s.getPId, &s.stopped)
+	go c.q2.StartDispatcher(s.ctx, s.sendPublish, s.getPId, &s.stopped)
 
 	if retryInterval > 0 {
 		s.stopped.Add(3)
-		go c.q2Stage2.MonitorTimeouts(retryInterval, s.sendPubRel, s.dead2, &s.stopped)
-		go c.q1.MonitorTimeouts(retryInterval, s.sendPublish, s.dead2, &s.stopped)
-		go c.q2.MonitorTimeouts(retryInterval, s.sendPublish, s.dead2, &s.stopped)
+		go c.q2Stage2.MonitorTimeouts(s.ctx, retryInterval, s.sendPubRel, &s.stopped)
+		go c.q1.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.stopped)
+		go c.q2.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.stopped)
 	}
 }
 
 func (s *session) stop() {
 	s.onlyOnce.Do(func() {
-		atomic.StoreInt32(&s.dead, 1)
-		close(s.dead2)
+		s.cancel()
 		s.conn.Close()
 		if c := s.client; c != nil {
-			if len(c.txFlush) == 0 {
-				select {
-				case c.txFlush <- struct{}{}:
-				default:
-				}
-			}
+			c.notifyFlusher()
 			c.q0.NotifyDispatcher()
 			c.q1.NotifyDispatcher()
 			c.q2.NotifyDispatcher()
 		}
 		s.stopped.Wait()
 	})
+}
+
+func (s *session) getPId() uint16 {
+	return <-s.client.pIDs
 }
 
 func (s *session) updateTimeout() {
@@ -163,13 +162,7 @@ func (s *session) sendPublish(i *queue.Item) error {
 		}
 	}
 
-	if len(s.client.txFlush) == 0 {
-		select {
-		case s.client.txFlush <- struct{}{}:
-		default:
-		}
-	}
-
+	s.client.notifyFlusher()
 	return nil
 }
 
@@ -198,13 +191,7 @@ func (s *session) sendPubRel(i *queue.Item) error {
 		return err
 	}
 
-	if len(s.client.txFlush) == 0 {
-		select {
-		case s.client.txFlush <- struct{}{}:
-		default:
-		}
-	}
-
+	s.client.notifyFlusher()
 	return nil
 }
 
@@ -229,22 +216,16 @@ func (s *session) writePacket(p []byte) error {
 		return err
 	}
 
-	if len(s.client.txFlush) == 0 {
-		select {
-		case s.client.txFlush <- struct{}{}:
-		default:
-		}
-	}
-
+	s.client.notifyFlusher()
 	s.client.txLock.Unlock()
 	return nil
 }
 
 func (s *Server) startSession(conn net.Conn) {
+	ctx, cancel := context.WithCancel(s.ctx)
 	conn.SetReadDeadline(time.Now().Add(time.Second * 10)) // CONNECT packet timeout
-	ns := session{conn: conn, dead2: make(chan struct{})}
-	ns.packet.vh = make([]byte, 0, 512)
-	ns.packet.payload = make([]byte, 0, 512)
+	ns := session{ctx: ctx, cancel: cancel, conn: conn}
+	ns.packet.vh, ns.packet.payload = make([]byte, 0, 512), make([]byte, 0, 512)
 
 	ns.stopped.Add(1)
 	graceFullExit := false
@@ -266,17 +247,12 @@ func (s *Server) startSession(conn net.Conn) {
 	for {
 		n, err := conn.Read(rx)
 		if err != nil {
-			errStr := err.Error()
-			if errStr == "EOF" {
-				return
-			}
-
-			if strings.Contains(errStr, "use of closed") {
+			if err.Error() == "EOF" || errors.Is(err, net.ErrClosed) {
 				return
 			}
 
 			// KeepAlive timeout
-			if strings.Contains(errStr, "i/o timeout") {
+			if strings.Contains(err.Error(), "i/o timeout") {
 				l := log.WithFields(log.Fields{
 					"clientId": ns.clientId,
 				})
@@ -313,26 +289,29 @@ func (s *Server) startSession(conn net.Conn) {
 
 func (s *session) startWriter() {
 	defer s.stopped.Done()
-	for range s.client.txFlush {
-		s.client.txLock.Lock()
-		if atomic.LoadInt32(&s.dead) == 1 {
-			s.client.txLock.Unlock()
-			return
-		}
+	done := s.ctx.Done()
 
-		if s.client.tx.Buffered() > 0 {
-			if err := s.client.tx.Flush(); err != nil {
-				s.client.txLock.Unlock()
-				if strings.Contains(err.Error(), "use of closed") {
+	for {
+		select {
+		case <-done:
+			return
+		case <-s.client.txFlush:
+			s.client.txLock.Lock()
+			if s.client.tx.Buffered() > 0 {
+				if err := s.client.tx.Flush(); err != nil {
+					s.client.txLock.Unlock()
+					if errors.Is(err, net.ErrClosed) {
+						return
+					}
+
+					log.WithFields(log.Fields{
+						"clientId": s.clientId,
+						"err":      err,
+					}).Error("TCP TX error")
 					return
 				}
-				log.WithFields(log.Fields{
-					"clientId": s.clientId,
-					"err":      err,
-				}).Error("TCP TX error")
-				return
 			}
+			s.client.txLock.Unlock()
 		}
-		s.client.txLock.Unlock()
 	}
 }

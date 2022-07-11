@@ -1,6 +1,7 @@
 package tests_test
 
 import (
+	"context"
 	"testing"
 
 	"github.com/RoanBrand/gobroke"
@@ -17,7 +18,7 @@ func TestService(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		if err := s.Run(); err != nil {
+		if err := s.Run(context.Background()); err != nil {
 			errs <- err
 		}
 	}()

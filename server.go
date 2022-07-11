@@ -1,6 +1,7 @@
 package gobroke
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -18,8 +19,11 @@ import (
 
 type Server struct {
 	config.Config
-	errs       chan error
+	ctx    context.Context
+	cancel context.CancelFunc
+
 	tcpL, tlsL net.Listener
+	ws, wss    websocket.WS
 
 	sesLock sync.Mutex
 	clients map[string]*client
@@ -31,15 +35,20 @@ type Server struct {
 	pubs queue.Basic
 }
 
-func (s *Server) Run() error {
+func (s *Server) Run(ctx context.Context) error {
 	if s.TCP.Address == "" && s.TLS.Address == "" && s.WS.Address == "" && s.WSS.Address == "" {
 		s.TCP.Address = ":1883" // default to basic TCP only server if nothing specified.
 	}
 
-	s.errs = make(chan error)
-	s.clients = make(map[string]*client, 16)
-	s.subscriptions = make(topicTree, 4)
-	s.retained = make(retainTree, 4)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.ctx, s.cancel = context.WithCancel(ctx)
+	defer s.cancel()
+
+	s.clients = make(map[string]*client)
+	s.subscriptions = make(topicTree)
+	s.retained = make(retainTree)
 
 	s.setupLogging()
 	s.pubs.Init()
@@ -51,13 +60,8 @@ func (s *Server) Run() error {
 		return err
 	}
 
-	websocket.SetDispatcher(s.startSession)
-	if err := s.setupWebsocket(); err != nil {
-		return err
-	}
-	if err := s.setupWebsocketSecure(); err != nil {
-		return err
-	}
+	s.ws.Run(s.ctx, s.WS.Address, s.WS.CheckOrigin, s.startSession)
+	s.wss.RunTLS(s.ctx, s.WSS.Address, s.WSS.Cert, s.WSS.Key, s.WSS.CheckOrigin, s.startSession)
 
 	lf := make(log.Fields, 4)
 	if s.TCP.Address != "" {
@@ -74,22 +78,49 @@ func (s *Server) Run() error {
 	}
 	log.WithFields(lf).Info("Starting MQTT server")
 
-	go s.pubs.StartDispatcher(func(i *queue.Item) error {
+	go s.pubs.StartDispatcher(s.ctx, func(i *queue.Item) error {
 		s.matchSubscriptions(i.P)
 		return nil
-	}, nil, nil)
+	}, nil)
 
-	return <-s.errs
+	<-s.ctx.Done()
+	err := s.ctx.Err()
+	if errors.Is(err, context.Canceled) {
+		err = nil
+	}
+	return err
 }
 
 func (s *Server) Stop() {
 	log.Info("Shutting down MQTT server")
+
 	if s.tcpL != nil {
-		s.tcpL.Close()
+		if err := s.tcpL.Close(); err != nil {
+			log.Errorln(err)
+		}
 	}
 	if s.tlsL != nil {
-		s.tlsL.Close()
+		if err := s.tlsL.Close(); err != nil {
+			log.Errorln(err)
+		}
 	}
+	if err := s.ws.Stop(); err != nil {
+		log.Errorln(err)
+	}
+	if err := s.wss.Stop(); err != nil {
+		log.Errorln(err)
+	}
+
+	s.sesLock.Lock()
+	for _, c := range s.clients {
+		if c.session != nil {
+			c.session.stop()
+		}
+	}
+	s.sesLock.Unlock()
+
+	s.cancel()
+	s.pubs.NotifyDispatcher()
 }
 
 func (s *Server) setupLogging() error {
@@ -123,7 +154,8 @@ func (s *Server) setupTCP() error {
 		return nil
 	}
 
-	l, err := net.Listen("tcp", s.TCP.Address)
+	var lc net.ListenConfig
+	l, err := lc.Listen(s.ctx, "tcp", s.TCP.Address)
 	if err != nil {
 		return err
 	}
@@ -164,31 +196,15 @@ func (s *Server) setupTLS() error {
 	return nil
 }
 
-func (s *Server) setupWebsocket() error {
-	if s.WS.Address == "" {
-		return nil
-	}
-
-	return websocket.Setup(s.WS.Address, s.WS.CheckOrigin, s.errs)
-}
-
-func (s *Server) setupWebsocketSecure() error {
-	c := &s.WSS
-	if c.Address == "" {
-		return nil
-	}
-
-	return websocket.SetupTLS(c.Address, c.Cert, c.Key, c.CheckOrigin, s.errs)
-}
-
 func (s *Server) startDispatcher(l net.Listener) {
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			if strings.Contains(err.Error(), "use of closed") {
-				err = nil
+			if errors.Is(err, net.ErrClosed) {
+				return
 			}
-			s.errs <- err
+
+			log.Errorln("failed to accept connection:", err)
 			return
 		}
 

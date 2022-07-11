@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -78,7 +77,7 @@ func (c *fakeClient) reader() {
 	for {
 		nRx, err := c.conn.Read(rx)
 		if err != nil {
-			if err.Error() != "EOF" && !strings.Contains(err.Error(), "use of closed") {
+			if err.Error() != "EOF" && !errors.Is(err, net.ErrClosed) {
 				c.errs <- err
 			}
 			close(c.dead)
@@ -289,7 +288,7 @@ func newClient(clientId string, errs chan error) *fakeClient {
 
 		acks:    make([]byte, 4),
 		workBuf: make([]byte, 0, 1024),
-		pIDs:    make(chan uint16, 65536),
+		pIDs:    make(chan uint16, 65535),
 		tx:      &bufio.Writer{},
 		txFlush: make(chan struct{}, 1),
 	}
@@ -531,7 +530,7 @@ func (c *fakeClient) startWriter() {
 		if c.tx.Buffered() > 0 {
 			if err := c.tx.Flush(); err != nil {
 				c.txLock.Unlock()
-				if strings.Contains(err.Error(), "use of closed") {
+				if errors.Is(err, net.ErrClosed) {
 					return
 				}
 				c.errs <- err

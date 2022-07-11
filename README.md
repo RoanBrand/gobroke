@@ -10,7 +10,7 @@ go get github.com/RoanBrand/gobroke
 import "github.com/RoanBrand/gobroke"
 
 s := gobroke.Server{}
-err := s.Run()
+err := s.Run(context.Background())
 if err != nil {
 	panic(err)
 }
@@ -27,7 +27,7 @@ s.TLS.Cert = "certs/example.crt"
 s.TLS.Key = "certs/example.key"
 s.WS.Address = ":8080"
 
-s.Run()
+s.Run(context.Background())
 ```
 * You can configure network protocols TCP, TLS, Websocket, and Secure Websocket (WSS).
 * Setting the `Address` field to `""` disables the network protocol and listener.

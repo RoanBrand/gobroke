@@ -2,6 +2,7 @@ package tests_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -590,11 +591,13 @@ func BenchmarkPubs(b *testing.B) {
 	errs := make(chan error, 1)
 	s := gobroke.Server{}
 	defer s.Stop()
+
 	go func() {
-		if err := s.Run(); err != nil {
+		if err := s.Run(context.Background()); err != nil {
 			errs <- err
 		}
 	}()
+	time.Sleep(time.Millisecond)
 
 	c1, err := dial("", true, 0, errs)
 	if err != nil {
@@ -612,11 +615,6 @@ func BenchmarkPubs(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	limiter := make(chan struct{}, 65500) // needed so server does not discard msgs destined for c1
-	for i := 0; i < 65500; i++ {
-		limiter <- struct{}{}
-	}
-
 	done := make(chan struct{})
 	go func() {
 		for i := 0; i < b.N; i++ {
@@ -626,7 +624,6 @@ func BenchmarkPubs(b *testing.B) {
 					errs <- err
 					return
 				}
-				limiter <- struct{}{}
 			} else if qos == 2 {
 				if err := c1.sendPubrec(pub.pID); err != nil {
 					errs <- err
@@ -644,7 +641,6 @@ func BenchmarkPubs(b *testing.B) {
 					errs <- err
 					return
 				}
-				limiter <- struct{}{}
 			}
 			done <- struct{}{}
 		}()
@@ -657,9 +653,6 @@ func BenchmarkPubs(b *testing.B) {
 	go func() {
 		<-start
 		for i := 0; i < b.N; i++ {
-			if qos > 0 {
-				<-limiter
-			}
 			if err := c2.pubMsg(msg, topic, qos, func(complete bool, pID uint16) {
 				switch qos {
 				case 1:
@@ -667,6 +660,7 @@ func BenchmarkPubs(b *testing.B) {
 						errs <- fmt.Errorf("expect puback, got something else pID %d", pID)
 						return
 					}
+
 					if f1 == b.N {
 						done <- struct{}{}
 					} else {

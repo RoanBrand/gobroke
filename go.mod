@@ -8,4 +8,4 @@ require (
 	golang.org/x/sys v0.0.0-20220317061510-51cd9980dadf // indirect
 )
 
-go 1.13
+go 1.18
