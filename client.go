@@ -89,7 +89,9 @@ func (c *client) processPub(p model.PubMessage, maxQoS uint8, retained bool) {
 		finalQoS = maxQoS
 	}
 
-	i := &queue.Item{P: p, TxQoS: finalQoS, Retained: retained}
+	i := queue.GetItem(p)
+	i.TxQoS, i.Retained = finalQoS, retained
+
 	switch finalQoS {
 	case 0:
 		c.q0.Add(i)
@@ -101,7 +103,8 @@ func (c *client) processPub(p model.PubMessage, maxQoS uint8, retained bool) {
 }
 
 func (c *client) qos1Done(pID uint16) {
-	if c.q1.Remove(pID) == nil {
+	i := c.q1.Remove(pID)
+	if i == nil {
 		log.WithFields(log.Fields{
 			"clientId": c.session.clientId,
 			"packetID": pID,
@@ -109,6 +112,7 @@ func (c *client) qos1Done(pID uint16) {
 		return
 	}
 
+	queue.ReturnItem(i)
 	c.pIDs <- pID
 }
 
@@ -127,7 +131,8 @@ func (c *client) qos2Part1Done(pID uint16) bool {
 }
 
 func (c *client) qos2Part2Done(pID uint16) {
-	if c.q2Stage2.Remove(pID) == nil {
+	i := c.q2Stage2.Remove(pID)
+	if i == nil {
 		log.WithFields(log.Fields{
 			"clientId": c.session.clientId,
 			"packetID": pID,
@@ -135,6 +140,7 @@ func (c *client) qos2Part2Done(pID uint16) {
 		return
 	}
 
+	queue.ReturnItem(i)
 	c.pIDs <- pID
 }
 

@@ -238,7 +238,7 @@ func (s *Server) startSession(conn net.Conn) {
 			}
 
 			if !graceFullExit && ns.will != nil {
-				s.pubs.Add(&queue.Item{P: ns.will})
+				s.pubs.Add(queue.GetItem(ns.will))
 			}
 		}
 	}()

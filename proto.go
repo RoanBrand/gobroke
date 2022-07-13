@@ -465,15 +465,15 @@ func (s *Server) handlePublish(ses *session) error {
 	c := ses.client
 	switch pub.RxQoS() {
 	case 0:
-		s.pubs.Add(&queue.Item{P: pub})
+		s.pubs.Add(queue.GetItem(pub))
 	case 1:
-		s.pubs.Add(&queue.Item{P: pub})
+		s.pubs.Add(queue.GetItem(pub))
 		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBACK, 2, byte(p.pID>>8), byte(p.pID)
 		return ses.writePacket(c.acks)
 	case 2: // [MQTT-4.3.3-2]
 		if _, ok := c.q2RxLookup[p.pID]; !ok {
 			c.q2RxLookup[p.pID] = struct{}{}
-			s.pubs.Add(&queue.Item{P: pub})
+			s.pubs.Add(queue.GetItem(pub))
 		}
 		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBREC, 2, byte(p.pID>>8), byte(p.pID)
 		return ses.writePacket(c.acks)

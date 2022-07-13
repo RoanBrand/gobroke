@@ -206,6 +206,7 @@ func (q *Basic) StartDispatcher(ctx context.Context, d func(*Item) error, wg *sy
 			if err := d(i); err != nil {
 				return
 			}
+			ReturnItem(i)
 		}
 	}
 }

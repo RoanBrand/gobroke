@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"sync"
 	"time"
 
 	"github.com/RoanBrand/gobroke/internal/model"
@@ -16,4 +17,23 @@ type Item struct {
 	Sent time.Time // PUBLISH QoS 1&2, PUBREL
 
 	next, prev *Item
+}
+
+var pool = sync.Pool{
+	New: func() any {
+		return new(Item)
+	},
+}
+
+func GetItem(p model.PubMessage) *Item {
+	i := pool.Get().(*Item)
+	i.P = p
+	return i
+}
+
+func ReturnItem(i *Item) {
+	i.P = nil
+	i.PId = 0
+	i.Sent = time.Time{}
+	pool.Put(i)
 }
