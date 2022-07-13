@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -485,7 +484,7 @@ func (s *Server) handlePublish(ses *session) error {
 
 func (s *Server) handleSubscribe(ses *session) error {
 	p := ses.packet.payload
-	topics, qoss := make([][]string, 0, 2), make([]uint8, 0, 2)
+	topics, qoss := make([][][]byte, 0, 2), make([]uint8, 0, 2)
 	i := uint32(0)
 
 	for i < uint32(len(p)) {
@@ -501,7 +500,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 			return protocolViolation("malformed SUBSCRIBE Topic Filter string: " + err.Error())
 		}
 
-		topics, qoss = append(topics, strings.Split(string(topic), "/")), append(qoss, p[topicEnd])
+		topics, qoss = append(topics, bytes.Split(topic, []byte{'/'})), append(qoss, p[topicEnd])
 		i += 1 + topicL
 	}
 
@@ -525,7 +524,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 
 func (s *Server) handleUnsubscribe(ses *session) error {
 	p := ses.packet.payload
-	topics := make([][]string, 0, 2)
+	topics := make([][][]byte, 0, 2)
 	i := uint32(0)
 
 	for i < uint32(len(p)) {
@@ -537,7 +536,7 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 			return protocolViolation("malformed UNSUBSCRIBE Topic Filter string: " + err.Error())
 		}
 
-		topics = append(topics, strings.Split(string(topic), "/"))
+		topics = append(topics, bytes.Split(topic, []byte{'/'}))
 		i += topicEnd
 	}
 

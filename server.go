@@ -1,6 +1,7 @@
 package gobroke
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"unsafe"
 
 	"github.com/RoanBrand/gobroke/internal/config"
 	"github.com/RoanBrand/gobroke/internal/model"
@@ -33,6 +35,8 @@ type Server struct {
 	retained      retainTree
 
 	pubs queue.Basic
+
+	sepPubTopic [][]byte
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -278,9 +282,9 @@ type topicLevel struct {
 	subscribers map[*client]uint8 // client -> QoS level
 }
 
-func (tl *topicLevel) init(size int) {
-	tl.children = make(topicTree, size)
-	tl.subscribers = make(map[*client]uint8, size)
+func (tl *topicLevel) init() {
+	tl.children = make(topicTree)
+	tl.subscribers = make(map[*client]uint8)
 }
 
 type topicTree map[string]*topicLevel // level -> sub levels
@@ -306,18 +310,7 @@ func (s *Server) removeClientSubscriptions(c *client) {
 }
 
 // Add subscriptions for client. Also check for matching retained messages.
-func (s *Server) addSubscriptions(c *client, topics [][]string, qoss []uint8) {
-	size := func(n int) (s int) {
-		if n < 8 {
-			s = 4
-		} else if n < 16 {
-			s = 2
-		} else {
-			s = 1
-		}
-		return
-	}
-
+func (s *Server) addSubscriptions(c *client, topics [][][]byte, qoss []uint8) {
 	s.subLock.Lock()
 	defer s.subLock.Unlock()
 
@@ -327,19 +320,20 @@ func (s *Server) addSubscriptions(c *client, topics [][]string, qoss []uint8) {
 		var sTL *topicLevel
 		var cTL *topL
 		var ok bool
-		for n, tl := range t {
+		for _, tl := range t {
+			tlStr := bytesToString(tl)
 			// Server subscriptions
-			if sTL, ok = sLev[tl]; !ok {
-				sLev[tl] = &topicLevel{}
-				sTL = sLev[tl]
-				sTL.init(size(n))
+			if sTL, ok = sLev[tlStr]; !ok {
+				sTL = &topicLevel{}
+				sLev[tlStr] = sTL
+				sTL.init()
 			}
 
 			// Client's subscriptions
-			if cTL, ok = cLev[tl]; !ok {
-				cLev[tl] = &topL{}
-				cTL = cLev[tl]
-				cTL.children = make(topT, size(n))
+			if cTL, ok = cLev[tlStr]; !ok {
+				cTL = &topL{}
+				cLev[tlStr] = cTL
+				cTL.children = make(topT)
 			}
 
 			sLev, cLev = sTL.children, cTL.children
@@ -364,7 +358,8 @@ func (s *Server) addSubscriptions(c *client, topics [][]string, qoss []uint8) {
 
 		var matchLevel func(retainTree, int)
 		matchLevel = func(l retainTree, n int) {
-			switch t[n] {
+			tlStr := bytesToString(t[n])
+			switch tlStr {
 			case "#":
 				forwardAll(l)
 			case "+":
@@ -374,7 +369,7 @@ func (s *Server) addSubscriptions(c *client, topics [][]string, qoss []uint8) {
 						forwardLevel(nl)
 					}
 				case 2:
-					if t[len(t)-1] == "#" {
+					if bytesToString(t[len(t)-1]) == "#" {
 						for _, nl := range l {
 							forwardLevel(nl)
 						}
@@ -386,7 +381,7 @@ func (s *Server) addSubscriptions(c *client, topics [][]string, qoss []uint8) {
 					}
 				}
 			default: // direct match
-				nl, ok := l[t[n]]
+				nl, ok := l[tlStr]
 				if !ok {
 					break
 				}
@@ -395,7 +390,7 @@ func (s *Server) addSubscriptions(c *client, topics [][]string, qoss []uint8) {
 				case 1:
 					forwardLevel(nl)
 				case 2:
-					if t[len(t)-1] == "#" {
+					if bytesToString(t[len(t)-1]) == "#" {
 						forwardLevel(nl)
 					}
 					fallthrough
@@ -409,7 +404,7 @@ func (s *Server) addSubscriptions(c *client, topics [][]string, qoss []uint8) {
 	}
 }
 
-func (s *Server) removeSubscriptions(c *client, topics [][]string) {
+func (s *Server) removeSubscriptions(c *client, topics [][][]byte) {
 	var sTL *topicLevel
 	var cTL *topL
 	var ok bool
@@ -422,13 +417,14 @@ loop:
 		sl, cl := s.subscriptions, c.subscriptions
 
 		for _, tl := range t {
+			tlStr := bytesToString(tl)
 			// Server
-			if sTL, ok = sl[tl]; !ok {
+			if sTL, ok = sl[tlStr]; !ok {
 				continue loop // no one subscribed to this
 			}
 
 			// Client
-			if cTL, ok = cl[tl]; !ok {
+			if cTL, ok = cl[tlStr]; !ok {
 				continue loop // client not subscribed
 			}
 
@@ -449,14 +445,14 @@ func (s *Server) forwardToSubscribers(tl *topicLevel, p model.PubMessage) {
 // Match published message topic to all subscribers, and forward.
 // Also store pub if retained message.
 func (s *Server) matchSubscriptions(p model.PubMessage) {
-	tLen := int(binary.BigEndian.Uint16(p[1:]))
-	topic := strings.Split(string(p[3:3+tLen]), "/")
+	tLen := binary.BigEndian.Uint16(p[1:])
+	s.splitPubTopic(p[3 : 3+tLen])
 
 	var matchLevel func(topicTree, int)
 	matchLevel = func(l topicTree, n int) {
 		// direct match
-		if nl, ok := l[topic[n]]; ok {
-			if n < len(topic)-1 {
+		if nl, ok := l[bytesToString(s.sepPubTopic[n])]; ok {
+			if n < len(s.sepPubTopic)-1 {
 				matchLevel(nl.children, n+1)
 			} else {
 				s.forwardToSubscribers(nl, p)
@@ -473,7 +469,7 @@ func (s *Server) matchSubscriptions(p model.PubMessage) {
 
 		// + match
 		if nl, ok := l["+"]; ok {
-			if n < len(topic)-1 {
+			if n < len(s.sepPubTopic)-1 {
 				matchLevel(nl.children, n+1)
 			} else {
 				s.forwardToSubscribers(nl, p)
@@ -496,16 +492,17 @@ func (s *Server) matchSubscriptions(p model.PubMessage) {
 	tr := s.retained
 	var nl *retainLevel
 	var ok bool
-	for _, tl := range topic {
-		if nl, ok = tr[tl]; !ok {
-			tr[tl] = &retainLevel{children: make(retainTree, 1)}
-			nl = tr[tl]
+	for _, tl := range s.sepPubTopic {
+		tlStr := bytesToString(tl)
+		if nl, ok = tr[tlStr]; !ok {
+			nl = &retainLevel{children: make(retainTree)}
+			tr[tlStr] = nl
 		}
 
 		tr = nl.children
 	}
 
-	if len(p) == 3+tLen {
+	if len(p) == 3+int(tLen) {
 		// payload empty, so delete existing retained message
 		nl.p = nil
 	} else {
@@ -519,3 +516,16 @@ type retainLevel struct {
 }
 
 type retainTree map[string]*retainLevel
+
+func bytesToString(b []byte) string {
+	return *(*string)(unsafe.Pointer(&b))
+}
+
+func (s *Server) splitPubTopic(topic []byte) {
+	s.sepPubTopic = s.sepPubTopic[:0]
+	for i := bytes.IndexByte(topic, '/'); i >= 0; i = bytes.IndexByte(topic, '/') {
+		s.sepPubTopic = append(s.sepPubTopic, topic[:i])
+		topic = topic[i+1:]
+	}
+	s.sepPubTopic = append(s.sepPubTopic, topic)
+}
