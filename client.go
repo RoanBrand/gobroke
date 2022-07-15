@@ -3,6 +3,7 @@ package gobroke
 import (
 	"bufio"
 	"sync"
+	"time"
 
 	"github.com/RoanBrand/gobroke/internal/model"
 	"github.com/RoanBrand/gobroke/internal/queue"
@@ -83,7 +84,7 @@ func (c *client) notifyFlusher() {
 	}
 }
 
-func (c *client) processPub(p model.PubMessage, maxQoS uint8, retained bool) {
+func (c *client) processPub(p *model.PubMessage, maxQoS uint8, retained bool) {
 	finalQoS := p.RxQoS()
 	if maxQoS < finalQoS {
 		finalQoS = maxQoS
@@ -91,6 +92,7 @@ func (c *client) processPub(p model.PubMessage, maxQoS uint8, retained bool) {
 
 	i := queue.GetItem(p)
 	i.TxQoS, i.Retained = finalQoS, retained
+	p.AddUser()
 
 	switch finalQoS {
 	case 0:
@@ -112,6 +114,7 @@ func (c *client) qos1Done(pID uint16) {
 		return
 	}
 
+	i.P.FreeIfLastUser()
 	queue.ReturnItem(i)
 	c.pIDs <- pID
 }
@@ -126,6 +129,8 @@ func (c *client) qos2Part1Done(pID uint16) bool {
 		return false
 	}
 
+	i.P.FreeIfLastUser()
+	i.Sent = time.Now()
 	c.q2Stage2.Add(i)
 	return true
 }

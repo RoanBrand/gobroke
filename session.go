@@ -32,7 +32,7 @@ type session struct {
 	keepAlive    time.Duration
 	protoVersion uint8
 
-	will     model.PubMessage
+	will     *model.PubMessage
 	userName string
 	password []byte
 }
@@ -114,55 +114,71 @@ func (s *session) updateTimeout() {
 
 func (s *session) sendPublish(i *queue.Item) error {
 	var publish byte = model.PUBLISH
-	if !i.Sent.IsZero() {
-		publish |= 0x08 // set DUP if sent before
-	}
+
 	if i.Retained {
 		publish |= 0x01
 	}
 
-	rl := len(i.P) - 1
-	if i.TxQoS > 0 {
+	rl := len(i.P.Pub) - 1
+	qos := i.TxQoS
+	if qos > 0 {
 		rl += 2
-		publish |= i.TxQoS << 1
+		publish |= qos << 1
+
+		if !i.Sent.IsZero() {
+			publish |= 0x08 // set DUP if sent before
+		}
+		i.Sent = time.Now()
 	}
 
 	s.client.txLock.Lock()
-	defer s.client.txLock.Unlock()
 
 	if err := s.client.tx.WriteByte(publish); err != nil {
+		s.client.txLock.Unlock()
 		return err
 	}
 
 	if err := model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
 		return s.client.tx.WriteByte(eb)
 	}); err != nil {
+		s.client.txLock.Unlock()
 		return err
 	}
 
-	if i.TxQoS == 0 {
-		if _, err := s.client.tx.Write(i.P[1:]); err != nil {
+	if qos == 0 {
+		if _, err := s.client.tx.Write(i.P.Pub[1:]); err != nil {
+			s.client.txLock.Unlock()
 			return err
 		}
 	} else {
-		tLen := binary.BigEndian.Uint16(i.P[1:])
-		if _, err := s.client.tx.Write(i.P[1 : 3+tLen]); err != nil {
+		tLen := binary.BigEndian.Uint16(i.P.Pub[1:])
+		if _, err := s.client.tx.Write(i.P.Pub[1 : 3+tLen]); err != nil {
+			s.client.txLock.Unlock()
 			return err
 		}
 
 		if err := s.client.tx.WriteByte(byte(i.PId >> 8)); err != nil {
+			s.client.txLock.Unlock()
 			return err
 		}
 		if err := s.client.tx.WriteByte(byte(i.PId)); err != nil {
+			s.client.txLock.Unlock()
 			return err
 		}
 
-		if _, err := s.client.tx.Write(i.P[3+tLen:]); err != nil {
+		if _, err := s.client.tx.Write(i.P.Pub[3+tLen:]); err != nil {
+			s.client.txLock.Unlock()
 			return err
 		}
 	}
 
+	s.client.txLock.Unlock()
 	s.client.notifyFlusher()
+
+	if qos == 0 {
+		i.P.FreeIfLastUser()
+	}
+
 	return nil
 }
 
@@ -172,25 +188,30 @@ func (s *session) sendPubRel(i *queue.Item) error {
 		pubrel |= 0x08 // set DUP if sent before
 	}
 
+	i.Sent = time.Now()
 	s.client.txLock.Lock()
-	defer s.client.txLock.Unlock()
 
 	// Header
 	if err := s.client.tx.WriteByte(pubrel); err != nil {
+		s.client.txLock.Unlock()
 		return err
 	}
 	// Length
 	if err := s.client.tx.WriteByte(2); err != nil {
+		s.client.txLock.Unlock()
 		return err
 	}
 	// pID
 	if err := s.client.tx.WriteByte(byte(i.PId >> 8)); err != nil {
+		s.client.txLock.Unlock()
 		return err
 	}
 	if err := s.client.tx.WriteByte(byte(i.PId)); err != nil {
+		s.client.txLock.Unlock()
 		return err
 	}
 
+	s.client.txLock.Unlock()
 	s.client.notifyFlusher()
 	return nil
 }
@@ -240,6 +261,7 @@ func (s *Server) startSession(conn net.Conn) {
 			if !graceFullExit && ns.will != nil {
 				s.pubs.Add(queue.GetItem(ns.will))
 			}
+			ns.will = nil
 		}
 	}()
 

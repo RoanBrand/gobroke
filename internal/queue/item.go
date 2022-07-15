@@ -9,10 +9,10 @@ import (
 
 // Item is stored in various publish message queues.
 type Item struct {
-	P        model.PubMessage // PUBLISH
-	PId      uint16           // PUBLISH QoS 1&2, PUBREL
-	TxQoS    uint8            // PUBLISH
-	Retained bool             // PUBLISH. Msg sent by server due to client subscription to topic with retained message
+	P        *model.PubMessage // PUBLISH
+	PId      uint16            // PUBLISH QoS 1&2, PUBREL
+	TxQoS    uint8             // PUBLISH
+	Retained bool              // PUBLISH. Msg sent by server due to client subscription to topic with retained message
 
 	Sent time.Time // PUBLISH QoS 1&2, PUBREL
 
@@ -25,7 +25,7 @@ var pool = sync.Pool{
 	},
 }
 
-func GetItem(p model.PubMessage) *Item {
+func GetItem(p *model.PubMessage) *Item {
 	i := pool.Get().(*Item)
 	i.P = p
 	return i

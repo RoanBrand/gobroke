@@ -380,7 +380,7 @@ func (s *Server) handleConnect(ses *session) error {
 			willPubFlags |= 0x01 // retain
 		}
 
-		ses.will = model.MakePub(willPubFlags, wTopicUTF8, p[offs:offs+wMsgLen])
+		ses.will = model.NewPub(willPubFlags, wTopicUTF8, p[offs:offs+wMsgLen])
 		offs += wMsgLen
 
 	} else if ses.connectFlags&0x38 > 0 { // [MQTT-3.1.2-11, 2-13, 2-15]
@@ -444,7 +444,7 @@ func (s *Server) handleConnect(ses *session) error {
 func (s *Server) handlePublish(ses *session) error {
 	p := &ses.packet
 	topicLen := uint32(binary.BigEndian.Uint16(p.vh))
-	pub := model.MakePub(p.flags, p.vh[:topicLen+2], p.payload)
+	pub := model.NewPub(p.flags, p.vh[:topicLen+2], p.payload)
 
 	if log.IsLevelEnabled(log.DebugLevel) {
 		lf := log.Fields{

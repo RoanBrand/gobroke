@@ -436,7 +436,7 @@ loop:
 	}
 }
 
-func (s *Server) forwardToSubscribers(tl *topicLevel, p model.PubMessage) {
+func (s *Server) forwardToSubscribers(tl *topicLevel, p *model.PubMessage) {
 	for c, maxQoS := range tl.subscribers {
 		c.processPub(p, maxQoS, false)
 	}
@@ -444,9 +444,9 @@ func (s *Server) forwardToSubscribers(tl *topicLevel, p model.PubMessage) {
 
 // Match published message topic to all subscribers, and forward.
 // Also store pub if retained message.
-func (s *Server) matchSubscriptions(p model.PubMessage) {
-	tLen := binary.BigEndian.Uint16(p[1:])
-	s.splitPubTopic(p[3 : 3+tLen])
+func (s *Server) matchSubscriptions(p *model.PubMessage) {
+	tLen := binary.BigEndian.Uint16(p.Pub[1:])
+	s.splitPubTopic(p.Pub[3 : 3+tLen])
 
 	var matchLevel func(topicTree, int)
 	matchLevel = func(l topicTree, n int) {
@@ -480,6 +480,11 @@ func (s *Server) matchSubscriptions(p model.PubMessage) {
 		}
 	}
 
+	if p.Retain() {
+		p.Refs++
+	}
+	defer p.FreeIfLastUser()
+
 	s.subLock.RLock()
 	defer s.subLock.RUnlock()
 
@@ -502,7 +507,11 @@ func (s *Server) matchSubscriptions(p model.PubMessage) {
 		tr = nl.children
 	}
 
-	if len(p) == 3+int(tLen) {
+	if nl.p != nil {
+		nl.p.FreeIfLastUser()
+	}
+
+	if len(p.Pub) == 3+int(tLen) {
 		// payload empty, so delete existing retained message
 		nl.p = nil
 	} else {
@@ -511,7 +520,7 @@ func (s *Server) matchSubscriptions(p model.PubMessage) {
 }
 
 type retainLevel struct {
-	p        model.PubMessage
+	p        *model.PubMessage
 	children retainTree
 }
 
