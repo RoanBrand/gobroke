@@ -480,17 +480,17 @@ func (s *Server) matchSubscriptions(p *model.PubMessage) {
 		}
 	}
 
-	if p.Retain() {
+	toRetain := p.ToRetain()
+	if toRetain {
 		p.Refs++
 	}
-	defer p.FreeIfLastUser()
 
 	s.subLock.RLock()
-	defer s.subLock.RUnlock()
-
 	matchLevel(s.subscriptions, 0)
 
-	if !p.Retain() {
+	if !toRetain {
+		s.subLock.RUnlock()
+		p.FreeIfLastUser()
 		return
 	}
 
@@ -517,6 +517,9 @@ func (s *Server) matchSubscriptions(p *model.PubMessage) {
 	} else {
 		nl.p = p
 	}
+
+	s.subLock.RUnlock()
+	p.FreeIfLastUser()
 }
 
 type retainLevel struct {

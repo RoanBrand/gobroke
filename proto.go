@@ -456,7 +456,7 @@ func (s *Server) handlePublish(ses *session) error {
 		if pub.Duplicate() {
 			lf["duplicate"] = true
 		}
-		if pub.Retain() {
+		if pub.ToRetain() {
 			lf["retain"] = true
 		}
 		log.WithFields(lf).Debug("Got PUBLISH packet")

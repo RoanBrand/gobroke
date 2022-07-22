@@ -121,11 +121,6 @@ func (q *QoS12) StartDispatcher(ctx context.Context, d func(*Item) error, getPId
 
 		if q.toSend == nil {
 			q.trig.Wait()
-
-			if ctx.Err() != nil {
-				q.Unlock()
-				return
-			}
 		}
 
 		i := q.toSend

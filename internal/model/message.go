@@ -56,6 +56,6 @@ func (p *PubMessage) RxQoS() uint8 {
 	return (p.Pub[0] & 0x06) >> 1 // qos of received msg
 }
 
-func (p *PubMessage) Retain() bool {
+func (p *PubMessage) ToRetain() bool {
 	return p.Pub[0]&0x01 > 0 // msg received by server to be retained
 }
