@@ -84,6 +84,7 @@ func (q *queue) Reset() {
 	q.Lock()
 	for i := q.h; i != nil; i = i.next {
 		q.remove(i)
+		i.P.FreeIfLastUser()
 		ReturnItem(i)
 	}
 	q.h, q.t = nil, nil

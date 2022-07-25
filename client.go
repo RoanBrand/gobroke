@@ -98,8 +98,10 @@ func (c *client) processPub(p *model.PubMessage, maxQoS uint8, retained bool) {
 	case 0:
 		c.q0.Add(i)
 	case 1:
+		i.PId, i.Sent = 0, time.Time{}
 		c.q1.Add(i)
 	case 2:
+		i.PId, i.Sent = 0, time.Time{}
 		c.q2.Add(i)
 	}
 }
@@ -130,7 +132,7 @@ func (c *client) qos2Part1Done(pID uint16) bool {
 	}
 
 	i.P.FreeIfLastUser()
-	i.Sent = time.Now()
+	i.P, i.Sent = nil, time.Now()
 	c.q2Stage2.Add(i)
 	return true
 }

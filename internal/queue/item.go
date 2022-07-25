@@ -33,7 +33,5 @@ func GetItem(p *model.PubMessage) *Item {
 
 func ReturnItem(i *Item) {
 	i.P = nil
-	i.PId = 0
-	i.Sent = time.Time{}
 	pool.Put(i)
 }

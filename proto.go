@@ -52,32 +52,24 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 		case controlAndFlags:
 			p.controlType, p.flags = rx[i]&0xF0, rx[i]&0x0F
 
-			if p.controlType < model.CONNECT || p.controlType > model.DISCONNECT {
-				return protocolViolation("invalid control packet")
-			}
-
-			// handle first and only connect
-			if ses.connectSent {
-				if p.controlType == model.CONNECT { // [MQTT-3.1.0-2]
-					return protocolViolation("second CONNECT packet")
-				}
-			} else {
-				if p.controlType != model.CONNECT { // [MQTT-3.1.0-1]
-					return protocolViolation("first packet not CONNECT")
-				}
+			// [MQTT-3.1.0-1]
+			if !ses.connectSent && p.controlType != model.CONNECT {
+				return protocolViolation("first packet not CONNECT")
 			}
 
 			switch p.controlType { // [MQTT-2.2.2-1, 2-2]
-			case model.CONNECT, model.PUBACK, model.PUBREC, model.PUBCOMP, model.PINGREQ:
+			case model.PUBLISH:
+				rawQoS := p.flags & 0x06
+				if rawQoS == 0 {
+					if p.flags&0x08 > 0 { // [MQTT-3.3.1-2]
+						return protocolViolation("malformed PUBLISH - DUP set for QoS0 Pub")
+					}
+				} else if rawQoS == 6 { // [MQTT-3.3.1-4]
+					return protocolViolation("malformed PUBLISH - No QoS3")
+				}
+			case model.PUBACK, model.PUBREC, model.PUBCOMP, model.PINGREQ:
 				if p.flags != 0 {
 					return protocolViolation("malformed packet - Fixed header flags must be 0 (reserved)")
-				}
-			case model.PUBLISH:
-				if (p.flags&0x08 > 0) && (p.flags&0x06 == 0) { // [MQTT-3.3.1-2]
-					return protocolViolation("malformed PUBLISH - DUP set for QoS0 Pub")
-				}
-				if p.flags&0x06 == 6 { // [MQTT-3.3.1-4]
-					return protocolViolation("malformed PUBLISH - No QoS3")
 				}
 			case model.PUBREL:
 				f := p.flags
@@ -113,6 +105,15 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				}).Debug("Got DISCONNECT packet")
 
 				return errCleanExit
+			case model.CONNECT:
+				if ses.connectSent { // [MQTT-3.1.0-2]
+					return protocolViolation("second CONNECT packet")
+				}
+				if p.flags != 0 {
+					return protocolViolation("malformed packet - Fixed header flags must be 0 (reserved)")
+				}
+			default:
+				return protocolViolation("invalid control packet")
 			}
 
 			p.lenMul = 1
@@ -128,7 +129,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 			if rx[i]&128 == 0 {
 				switch p.controlType {
-				case model.CONNECT, model.PUBLISH:
+				case model.PUBLISH, model.CONNECT:
 					p.vhLen = 0 // determined later
 				case model.PUBACK, model.PUBREC, model.PUBREL, model.PUBCOMP:
 					p.vhLen = 2
@@ -153,10 +154,9 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					ses.rxState = controlAndFlags
 				} else {
 					p.vh = p.vh[:0]
-					switch p.controlType {
-					case model.CONNECT, model.PUBLISH:
+					if p.controlType == model.PUBLISH || p.controlType == model.CONNECT {
 						ses.rxState = variableHeaderLen
-					default:
+					} else {
 						ses.rxState = variableHeader
 					}
 				}
@@ -170,13 +170,12 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 			if p.vhLen == 2 {
 				p.vhLen = uint32(binary.BigEndian.Uint16(p.vh)) // vhLen is now remaining
-				switch p.controlType {
-				case model.CONNECT:
-					p.vhLen += 4 // ProtoVersion + ConnectFlags + KeepAlive
-				case model.PUBLISH:
+				if p.controlType == model.PUBLISH {
 					if p.flags&0x06 > 0 { // Qos > 0
 						p.vhLen += 2
 					}
+				} else { // CONNECT
+					p.vhLen += 4 // ProtoVersion + ConnectFlags + KeepAlive
 				}
 				ses.rxState = variableHeader
 			}
@@ -196,35 +195,8 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			if p.vhLen == 0 {
 				c := ses.client
 				switch p.controlType {
-				case model.CONNECT:
-					pnLen := binary.BigEndian.Uint16(p.vh)
-					ses.protoVersion = p.vh[2+pnLen]
-
-					if !bytes.Equal(protoVersionToName[ses.protoVersion], p.vh[2:2+pnLen]) { // [MQTT-3.1.2-1]
-						ses.sendConnack(1, false) // [MQTT-3.1.2-2]
-						return protocolViolation("unsupported client protocol. Must be MQTT 3 or 4")
-					}
-
-					switch ses.protoVersion {
-					case 3:
-						if p.remainingLength < 3 {
-							return protocolViolation("invalid CONNECT - clientId must be between 1-23 characters long for MQTT 3")
-						}
-					case 4:
-						if p.remainingLength < 2 { // [MQTT-3.1.3-3]
-							return protocolViolation("invalid CONNECT - absent clientId in payload")
-						}
-					}
-
-					ses.connectFlags = p.vh[3+pnLen]
-					if ses.connectFlags&0x01 > 0 { // [MQTT-3.1.2-3]
-						return protocolViolation("malformed CONNECT")
-					}
-
-					// [MQTT-3.1.2-24]
-					ses.keepAlive = time.Duration(binary.BigEndian.Uint16(p.vh[4+pnLen:])) * time.Second * 3 / 2
 				case model.PUBLISH:
-					tLen := uint32(binary.BigEndian.Uint16(p.vh))
+					tLen := binary.BigEndian.Uint16(p.vh)
 					if tLen > 0 {
 						if err := checkUTF8(p.vh[2:2+tLen], true); err != nil { // [MQTT-3.3.2-1]
 							return protocolViolation("Invalid Publish Topic string: " + err.Error())
@@ -252,6 +224,33 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					}
 				case model.PUBCOMP:
 					c.qos2Part2Done(binary.BigEndian.Uint16(p.vh))
+				case model.CONNECT:
+					pnLen := binary.BigEndian.Uint16(p.vh)
+					ses.protoVersion = p.vh[2+pnLen]
+
+					if !bytes.Equal(protoVersionToName[ses.protoVersion], p.vh[2:2+pnLen]) { // [MQTT-3.1.2-1]
+						ses.sendConnack(1, false) // [MQTT-3.1.2-2]
+						return protocolViolation("unsupported client protocol. Must be MQTT 3 or 4")
+					}
+
+					switch ses.protoVersion {
+					case 3:
+						if p.remainingLength < 3 {
+							return protocolViolation("invalid CONNECT - clientId must be between 1-23 characters long for MQTT 3")
+						}
+					case 4:
+						if p.remainingLength < 2 { // [MQTT-3.1.3-3]
+							return protocolViolation("invalid CONNECT - absent clientId in payload")
+						}
+					}
+
+					ses.connectFlags = p.vh[3+pnLen]
+					if ses.connectFlags&0x01 > 0 { // [MQTT-3.1.2-3]
+						return protocolViolation("malformed CONNECT")
+					}
+
+					// [MQTT-3.1.2-24]
+					ses.keepAlive = time.Duration(binary.BigEndian.Uint16(p.vh[4+pnLen:])) * time.Second * 3 / 2
 				}
 
 				p.payload = p.payload[:0]
@@ -282,14 +281,14 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			if p.remainingLength == 0 {
 				var err error
 				switch p.controlType {
-				case model.CONNECT:
-					err = s.handleConnect(ses)
 				case model.PUBLISH:
 					err = s.handlePublish(ses)
 				case model.SUBSCRIBE:
 					err = s.handleSubscribe(ses)
 				case model.UNSUBSCRIBE:
 					err = s.handleUnsubscribe(ses)
+				case model.CONNECT:
+					err = s.handleConnect(ses)
 				}
 				if err != nil {
 					return err
@@ -443,7 +442,7 @@ func (s *Server) handleConnect(ses *session) error {
 
 func (s *Server) handlePublish(ses *session) error {
 	p := &ses.packet
-	topicLen := uint32(binary.BigEndian.Uint16(p.vh))
+	topicLen := binary.BigEndian.Uint16(p.vh)
 	pub := model.NewPub(p.flags, p.vh[:topicLen+2], p.payload)
 
 	if log.IsLevelEnabled(log.DebugLevel) {

@@ -27,6 +27,8 @@ func NewPub(flags uint8, topicUTF8, payload []byte) *PubMessage {
 	p.Refs = 1
 	if p.Pub == nil {
 		p.Pub = make([]byte, 1, 1+len(topicUTF8)+len(payload))
+	} else {
+		p.Pub = p.Pub[:1]
 	}
 
 	p.Pub[0] = flags
@@ -44,7 +46,6 @@ func (p *PubMessage) FreeIfLastUser() {
 		return
 	}
 
-	p.Pub = p.Pub[:1]
 	pool.Put(p)
 }
 

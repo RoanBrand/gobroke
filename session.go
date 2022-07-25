@@ -267,7 +267,7 @@ func (s *Server) startSession(conn net.Conn) {
 
 	rx := make([]byte, 1024)
 	for {
-		n, err := conn.Read(rx)
+		nRx, err := conn.Read(rx)
 		if err != nil {
 			if err.Error() == "EOF" || errors.Is(err, net.ErrClosed) {
 				return
@@ -293,18 +293,16 @@ func (s *Server) startSession(conn net.Conn) {
 			return
 		}
 
-		if n > 0 {
-			if err := s.parseStream(&ns, rx[:n]); err != nil {
-				if err == errCleanExit {
-					graceFullExit = true
-				} else {
-					log.WithFields(log.Fields{
-						"clientId": ns.clientId,
-						"err":      err,
-					}).Error("RX stream packet parse error")
-				}
-				return
+		if err = s.parseStream(&ns, rx[:nRx]); err != nil {
+			if err == errCleanExit {
+				graceFullExit = true
+			} else {
+				log.WithFields(log.Fields{
+					"clientId": ns.clientId,
+					"err":      err,
+				}).Error("RX stream packet parse error")
 			}
+			return
 		}
 	}
 }
