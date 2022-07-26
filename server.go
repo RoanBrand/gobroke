@@ -442,53 +442,47 @@ func (s *Server) forwardToSubscribers(tl *topicLevel, p *model.PubMessage) {
 	}
 }
 
+func (s *Server) matchTopicLevel(p *model.PubMessage, l topicTree, ln int) {
+	// direct match
+	if nl, ok := l[bytesToString(s.sepPubTopic[ln])]; ok {
+		if ln < len(s.sepPubTopic)-1 {
+			s.matchTopicLevel(p, nl.children, ln+1)
+		} else {
+			s.forwardToSubscribers(nl, p)
+			if nl, ok := nl.children["#"]; ok { // # match - next level
+				s.forwardToSubscribers(nl, p)
+			}
+		}
+	}
+
+	// # match
+	if nl, ok := l["#"]; ok {
+		s.forwardToSubscribers(nl, p)
+	}
+
+	// + match
+	if nl, ok := l["+"]; ok {
+		if ln < len(s.sepPubTopic)-1 {
+			s.matchTopicLevel(p, nl.children, ln+1)
+		} else {
+			s.forwardToSubscribers(nl, p)
+			if nl, ok := nl.children["#"]; ok { // # match - next level
+				s.forwardToSubscribers(nl, p)
+			}
+		}
+	}
+}
+
 // Match published message topic to all subscribers, and forward.
 // Also store pub if retained message.
 func (s *Server) matchSubscriptions(p *model.PubMessage) {
 	tLen := binary.BigEndian.Uint16(p.Pub[1:])
 	s.splitPubTopic(p.Pub[3 : 3+tLen])
 
-	var matchLevel func(topicTree, int)
-	matchLevel = func(l topicTree, n int) {
-		// direct match
-		if nl, ok := l[bytesToString(s.sepPubTopic[n])]; ok {
-			if n < len(s.sepPubTopic)-1 {
-				matchLevel(nl.children, n+1)
-			} else {
-				s.forwardToSubscribers(nl, p)
-				if nl, ok := nl.children["#"]; ok { // # match - next level
-					s.forwardToSubscribers(nl, p)
-				}
-			}
-		}
-
-		// # match
-		if nl, ok := l["#"]; ok {
-			s.forwardToSubscribers(nl, p)
-		}
-
-		// + match
-		if nl, ok := l["+"]; ok {
-			if n < len(s.sepPubTopic)-1 {
-				matchLevel(nl.children, n+1)
-			} else {
-				s.forwardToSubscribers(nl, p)
-				if nl, ok := nl.children["#"]; ok { // # match - next level
-					s.forwardToSubscribers(nl, p)
-				}
-			}
-		}
-	}
-
-	toRetain := p.ToRetain()
-	if toRetain {
-		p.Refs++
-	}
-
 	s.subLock.RLock()
-	matchLevel(s.subscriptions, 0)
+	s.matchTopicLevel(p, s.subscriptions, 0)
 
-	if !toRetain {
+	if !p.ToRetain() {
 		s.subLock.RUnlock()
 		p.FreeIfLastUser()
 		return
@@ -507,19 +501,22 @@ func (s *Server) matchSubscriptions(p *model.PubMessage) {
 		tr = nl.children
 	}
 
-	if nl.p != nil {
-		nl.p.FreeIfLastUser()
-	}
+	oldRetained := nl.p
 
 	if len(p.Pub) == 3+int(tLen) {
 		// payload empty, so delete existing retained message
 		nl.p = nil
+		s.subLock.RUnlock()
+		p.FreeIfLastUser() // free as not going to be used
 	} else {
 		nl.p = p
+		s.subLock.RUnlock()
+		// do not free p as we transfer ref of this thread to nl.p
 	}
 
-	s.subLock.RUnlock()
-	p.FreeIfLastUser()
+	if oldRetained != nil {
+		oldRetained.FreeIfLastUser()
+	}
 }
 
 type retainLevel struct {

@@ -53,23 +53,26 @@ func benchmarkPubs(b *testing.B, qos uint8) {
 	}
 
 	done := make(chan struct{})
-	go func() {
-		for i := 0; i < b.N; i++ {
-			pub := <-c1.pubs
-			if qos == 1 {
-				if err := c1.sendPuback(pub.pID); err != nil {
-					errs <- err
-					return
-				}
-			} else if qos == 2 {
-				if err := c1.sendPubrec(pub.pID); err != nil {
-					errs <- err
-					return
-				}
+
+	nRx := 0
+	c1.pubReceiver = func(topic, msg []byte, pID uint16, qos uint8, dup bool) {
+		nRx++
+		if qos == 1 {
+			if err := c1.sendPuback(pID); err != nil {
+				errs <- err
+				return
+			}
+		} else if qos == 2 {
+			if err := c1.sendPubrec(pID); err != nil {
+				errs <- err
+				return
 			}
 		}
-		done <- struct{}{}
-	}()
+		if nRx == b.N {
+			done <- struct{}{}
+		}
+	}
+
 	if qos == 2 {
 		go func() {
 			for i := 0; i < b.N; i++ {
@@ -87,40 +90,44 @@ func benchmarkPubs(b *testing.B, qos uint8) {
 	f1, f2 := 1, 1
 	start := make(chan struct{})
 
+	if qos > 0 {
+		c2.txCallBack = func(pID uint16, complete bool) {
+			switch qos {
+			case 1:
+				if !complete { // not puback
+					errs <- fmt.Errorf("expect puback, got something else pID %d", pID)
+					return
+				}
+
+				if f1 == b.N {
+					done <- struct{}{}
+				} else {
+					f1++
+				}
+			case 2:
+				if complete { // PUBCOMPS
+					if f2 == b.N && f1 == b.N {
+						done <- struct{}{}
+					} else {
+						f2++
+					}
+				} else { // PUBRECs
+					if err := c2.sendPubrel(pID); err != nil {
+						errs <- err
+						return
+					}
+					if f1 < b.N {
+						f1++
+					}
+				}
+			}
+		}
+	}
+
 	go func() {
 		<-start
 		for i := 0; i < b.N; i++ {
-			if err := c2.pubMsg(msg, topic, qos, func(complete bool, pID uint16) {
-				switch qos {
-				case 1:
-					if !complete { // not puback
-						errs <- fmt.Errorf("expect puback, got something else pID %d", pID)
-						return
-					}
-
-					if f1 == b.N {
-						done <- struct{}{}
-					} else {
-						f1++
-					}
-				case 2:
-					if complete { // PUBCOMPS
-						if f2 == b.N && f1 == b.N {
-							done <- struct{}{}
-						} else {
-							f2++
-						}
-					} else { // PUBRECs
-						if err := c2.sendPubrel(pID); err != nil {
-							errs <- err
-							return
-						}
-						if f1 < b.N {
-							f1++
-						}
-					}
-				}
-			}); err != nil {
+			if err := c2.pubMsg(msg, topic, qos); err != nil {
 				errs <- err
 				return
 			}
@@ -128,7 +135,7 @@ func benchmarkPubs(b *testing.B, qos uint8) {
 		done <- struct{}{}
 	}()
 
-	time.Sleep(time.Millisecond * 10) // give chance for everything to startup
+	time.Sleep(time.Microsecond) // give chance for everything to startup
 	b.ResetTimer()
 	close(start)
 

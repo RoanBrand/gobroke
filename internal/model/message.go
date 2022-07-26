@@ -7,7 +7,7 @@ import (
 
 // PubMessage is a data message from a client published to the Server.
 type PubMessage struct {
-	Refs int32
+	refs int32
 
 	// flags + topicUTF8 + payload
 	// byte 0: publish flags, i.e. DUP, QoS, Retain
@@ -16,21 +16,17 @@ type PubMessage struct {
 	Pub []byte
 }
 
-var pool = sync.Pool{
-	New: func() any {
-		return new(PubMessage)
-	},
-}
+var pool = sync.Pool{}
 
-func NewPub(flags uint8, topicUTF8, payload []byte) *PubMessage {
-	p := pool.Get().(*PubMessage)
-	p.Refs = 1
-	if p.Pub == nil {
-		p.Pub = make([]byte, 1, 1+len(topicUTF8)+len(payload))
+func NewPub(flags uint8, topicUTF8, payload []byte) (p *PubMessage) {
+	if pi := pool.Get(); pi == nil {
+		p = &PubMessage{Pub: make([]byte, 1, 1+len(topicUTF8)+len(payload))}
 	} else {
+		p = pi.(*PubMessage)
 		p.Pub = p.Pub[:1]
 	}
 
+	p.refs = 1
 	p.Pub[0] = flags
 	p.Pub = append(p.Pub, topicUTF8...)
 	p.Pub = append(p.Pub, payload...)
@@ -38,11 +34,11 @@ func NewPub(flags uint8, topicUTF8, payload []byte) *PubMessage {
 }
 
 func (p *PubMessage) AddUser() {
-	atomic.AddInt32(&p.Refs, 1)
+	atomic.AddInt32(&p.refs, 1)
 }
 
 func (p *PubMessage) FreeIfLastUser() {
-	if atomic.AddInt32(&p.Refs, -1) > 0 {
+	if atomic.AddInt32(&p.refs, -1) > 0 {
 		return
 	}
 

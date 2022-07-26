@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -305,7 +306,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 	return nil
 }
 
-var unNamedClients int
+var unNamedClients uint32
 
 func (s *Server) handleConnect(ses *session) error {
 	p := ses.packet.payload
@@ -335,8 +336,8 @@ func (s *Server) handleConnect(ses *session) error {
 			return protocolViolation("must have clientID when persistent session")
 		}
 
-		ses.clientId = fmt.Sprintf("noname-%d-%d", unNamedClients, time.Now().UnixNano()/100000)
-		unNamedClients++
+		newUnNamed := atomic.AddUint32(&unNamedClients, 1)
+		ses.clientId = fmt.Sprintf("noname-%d-%d", newUnNamed, time.Now().UnixNano()/100000)
 	}
 
 	// Will Topic & Msg

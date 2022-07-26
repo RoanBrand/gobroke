@@ -19,14 +19,15 @@ type Item struct {
 	next, prev *Item
 }
 
-var pool = sync.Pool{
-	New: func() any {
-		return new(Item)
-	},
-}
+var pool = sync.Pool{}
 
-func GetItem(p *model.PubMessage) *Item {
-	i := pool.Get().(*Item)
+func GetItem(p *model.PubMessage) (i *Item) {
+	if pi := pool.Get(); pi == nil {
+		i = new(Item)
+	} else {
+		i = pi.(*Item)
+	}
+
 	i.P = p
 	return i
 }
@@ -34,4 +35,9 @@ func GetItem(p *model.PubMessage) *Item {
 func ReturnItem(i *Item) {
 	i.P = nil
 	pool.Put(i)
+}
+
+func ReturnItemQos12(i *Item) {
+	i.PId, i.Sent = 0, time.Time{}
+	ReturnItem(i)
 }

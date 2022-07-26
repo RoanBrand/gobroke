@@ -20,17 +20,18 @@ type fakeClient struct {
 
 	errs          chan error
 	conn          net.Conn
-	pubs          chan pubInfo
+	pubReceiver   rxHandler
+	txCallBack    func(pID uint16, complete bool)
 	pubrels       chan uint16
 	connacks      chan connackInfo
 	subbed        chan subackInfo
 	pingResponses chan struct{}
 
 	qL        sync.Mutex
-	q1Pubacks map[uint16]pubctrl // pubs to server
+	q1Pubacks map[uint16]struct{} // pubs to server
 
-	q2Pubrecs  map[uint16]pubctrl
-	q2Pubcomps map[uint16]pubctrl
+	q2Pubrecs  map[uint16]struct{}
+	q2Pubcomps map[uint16]struct{}
 	q2PubRelTx map[uint16]struct{}
 
 	acks, workBuf []byte
@@ -45,13 +46,7 @@ type fakeClient struct {
 	dead   chan struct{}
 }
 
-type pubInfo struct {
-	topic string
-	dup   bool
-	qos   uint8
-	pID   uint16
-	msg   []byte
-}
+type rxHandler func(pTopic, pMsg []byte, pID uint16, qos uint8, dup bool)
 
 type connackInfo struct {
 	sp   uint8
@@ -63,13 +58,9 @@ type subackInfo struct {
 	qos uint8
 }
 
-type pubctrl struct {
-	callback func(complete bool, pID uint16)
-}
-
 func (c *fakeClient) reader() {
 	rx := make([]byte, 4096)
-	var rxState, controlAndFlags uint8
+	var rxState, controlAndFlags, controlB uint8
 	var remainLen, lenMul, vhLen uint32
 	vh, payload := make([]byte, 0, 512), make([]byte, 0, 512)
 	defer c.wg.Done()
@@ -89,13 +80,14 @@ func (c *fakeClient) reader() {
 			switch rxState {
 			case 0: // control & flags
 				controlAndFlags = rx[i]
+				controlB = controlAndFlags & 0xF0
 				lenMul, remainLen, rxState = 1, 0, 1
 				i++
 			case 1: // remaining len
 				remainLen += uint32(rx[i]&127) * lenMul
 				lenMul *= 128
 				if rx[i]&128 == 0 {
-					switch controlAndFlags & 0xF0 {
+					switch controlB {
 					case model.PUBLISH:
 						vhLen = 0
 					case model.PINGRESP:
@@ -108,7 +100,7 @@ func (c *fakeClient) reader() {
 						rxState = 0
 					} else {
 						vh = vh[:0]
-						if controlAndFlags&0xF0 == model.PUBLISH {
+						if controlB == model.PUBLISH {
 							rxState = 2
 						} else {
 							rxState = 3
@@ -140,18 +132,18 @@ func (c *fakeClient) reader() {
 				remainLen -= toRead
 
 				if vhLen == 0 {
-					switch controlAndFlags & 0xF0 {
+					switch controlB {
 					case model.CONNACK:
 						c.connacks <- connackInfo{vh[0], vh[1]}
 					case model.PUBACK:
 						pID := binary.BigEndian.Uint16(vh)
 						c.qL.Lock()
-						if pi, ok := c.q1Pubacks[pID]; ok {
+						if _, ok := c.q1Pubacks[pID]; ok {
 							delete(c.q1Pubacks, pID)
 							c.qL.Unlock()
 
-							if pi.callback != nil {
-								pi.callback(true, pID)
+							if c.txCallBack != nil {
+								c.txCallBack(pID, true)
 							}
 							c.pIDs <- pID
 						} else {
@@ -162,13 +154,13 @@ func (c *fakeClient) reader() {
 					case model.PUBREC:
 						pID := binary.BigEndian.Uint16(vh)
 						c.qL.Lock()
-						if pi, ok := c.q2Pubrecs[pID]; ok {
+						if _, ok := c.q2Pubrecs[pID]; ok {
 							delete(c.q2Pubrecs, pID)
-							c.q2Pubcomps[pID] = pi
+							c.q2Pubcomps[pID] = struct{}{}
 							c.qL.Unlock()
 
-							if pi.callback != nil {
-								pi.callback(false, pID)
+							if c.txCallBack != nil {
+								c.txCallBack(pID, false)
 							} else {
 								if err = c.sendPubrel(pID); err != nil {
 									c.errs <- err
@@ -183,12 +175,12 @@ func (c *fakeClient) reader() {
 					case model.PUBCOMP:
 						pID := binary.BigEndian.Uint16(vh)
 						c.qL.Lock()
-						if pi, ok := c.q2Pubcomps[pID]; ok {
+						if _, ok := c.q2Pubcomps[pID]; ok {
 							delete(c.q2Pubcomps, pID)
 							c.qL.Unlock()
 
-							if pi.callback != nil {
-								pi.callback(true, pID)
+							if c.txCallBack != nil {
+								c.txCallBack(pID, true)
 							}
 							c.pIDs <- pID
 						} else {
@@ -204,11 +196,8 @@ func (c *fakeClient) reader() {
 
 					payload = payload[:0]
 					if remainLen == 0 {
-						if controlAndFlags&0xF0 == model.PUBLISH {
-							if err := c.handlePub(controlAndFlags, vh, payload); err != nil {
-								c.errs <- err
-								return
-							}
+						if controlB == model.PUBLISH {
+							c.handlePub(controlAndFlags, vh, payload)
 						}
 						rxState = 0
 					} else {
@@ -226,12 +215,9 @@ func (c *fakeClient) reader() {
 				remainLen -= toRead
 
 				if remainLen == 0 {
-					switch controlAndFlags & 0xF0 {
+					switch controlB {
 					case model.PUBLISH:
-						if err := c.handlePub(controlAndFlags, vh, payload); err != nil {
-							c.errs <- err
-							return
-						}
+						c.handlePub(controlAndFlags, vh, payload)
 					case model.SUBACK:
 						c.subbed <- subackInfo{binary.BigEndian.Uint16(vh), payload[0]}
 					}
@@ -243,23 +229,16 @@ func (c *fakeClient) reader() {
 	}
 }
 
-func (c *fakeClient) handlePub(flags uint8, vh, payload []byte) error {
+func (c *fakeClient) handlePub(flags uint8, vh, payload []byte) {
 	topicLen := binary.BigEndian.Uint16(vh)
-	topic := string(vh[2 : 2+topicLen])
+	topic := vh[2 : 2+topicLen]
 	qos := (flags & 0x06) >> 1
 	var pID uint16
 	if qos > 0 {
-		//c.q1PubReadId++
 		pID = binary.BigEndian.Uint16(vh[2+topicLen:])
-		/*if c.q1PubReadId != pID {
-			return fmt.Errorf("publish id %d received, expected %d", pID, c.q1PubReadId)
-		}*/
 	}
 
-	msg := make([]byte, len(payload))
-	copy(msg, payload)
-	c.pubs <- pubInfo{topic, flags&0x08 > 0, qos, pID, msg}
-	return nil
+	c.pubReceiver(topic, payload, pID, qos, flags&0x08 > 0)
 }
 
 func dial(clientId string, cleanSes bool, expectSp uint8, errs chan error) (*fakeClient, error) {
@@ -276,14 +255,13 @@ func newClient(clientId string, errs chan error) *fakeClient {
 	c := fakeClient{
 		ClientID:      clientId,
 		errs:          errs,
-		pubs:          make(chan pubInfo, 1024),
-		pubrels:       make(chan uint16, 1024),
+		pubrels:       make(chan uint16),
 		connacks:      make(chan connackInfo),
 		subbed:        make(chan subackInfo),
 		pingResponses: make(chan struct{}),
-		q1Pubacks:     make(map[uint16]pubctrl),
-		q2Pubrecs:     make(map[uint16]pubctrl),
-		q2Pubcomps:    make(map[uint16]pubctrl),
+		q1Pubacks:     make(map[uint16]struct{}),
+		q2Pubrecs:     make(map[uint16]struct{}),
+		q2Pubcomps:    make(map[uint16]struct{}),
 		q2PubRelTx:    make(map[uint16]struct{}),
 
 		acks:    make([]byte, 4),
@@ -389,21 +367,21 @@ func (c *fakeClient) stop(sendDisconnect bool) error {
 	return nil
 }
 
-func (c *fakeClient) pubMsg(msg []byte, topic string, qos uint8, callback func(complete bool, pID uint16)) error {
+func (c *fakeClient) pubMsg(msg []byte, topic string, qos uint8) error {
 	var pID uint16
 	if qos > 0 {
 		pID = <-c.pIDs
 	}
-	return c.pubMsgRaw(msg, topic, qos, pID, false, callback)
+	return c.pubMsgRaw(msg, topic, qos, pID, false)
 }
 
-func (c *fakeClient) pubMsgRaw(msg []byte, topic string, qos uint8, pubID uint16, dup bool, callback func(complete bool, pID uint16)) error {
+func (c *fakeClient) pubMsgRaw(msg []byte, topic string, qos uint8, pubID uint16, dup bool) error {
 	if qos > 0 {
 		c.qL.Lock()
 		if qos == 1 {
-			c.q1Pubacks[pubID] = pubctrl{callback: callback}
+			c.q1Pubacks[pubID] = struct{}{}
 		} else {
-			c.q2Pubrecs[pubID] = pubctrl{callback: callback}
+			c.q2Pubrecs[pubID] = struct{}{}
 		}
 		c.qL.Unlock()
 	}
@@ -484,14 +462,12 @@ func (c *fakeClient) sendPubrec(pID uint16) error {
 
 func (c *fakeClient) sendPubrel(pID uint16) error {
 	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBREL|2, 2, uint8(pID>>8), uint8(pID)
-	err := c.writePacket(c.acks)
-	return err
+	return c.writePacket(c.acks)
 }
 
 func (c *fakeClient) sendPubcomp(pID uint16) error {
 	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBCOMP, 2, uint8(pID>>8), uint8(pID)
-	err := c.writePacket(c.acks)
-	return err
+	return c.writePacket(c.acks)
 }
 
 func (c *fakeClient) sendPing() error {
@@ -501,8 +477,7 @@ func (c *fakeClient) sendPing() error {
 
 func (c *fakeClient) sendDisconnect() error {
 	c.acks[0], c.acks[1] = model.DISCONNECT, 0
-	err := c.writePacket(c.acks[:2])
-	return err
+	return c.writePacket(c.acks[:2])
 }
 
 func (c *fakeClient) writePacket(p []byte) error {

@@ -47,10 +47,11 @@ func testConnect(t *testing.T) {
 	}
 
 	protoErr := errors.New("After a Network Connection is established by a Client to a Server, the first Packet sent from the Client to the Server MUST be a CONNECT Packet [MQTT-3.1.0-1].")
-
-	if err := c.pubMsg([]byte("not a CONNECT first"), "topic", 0, func(complete bool, pID uint16) {
+	c.txCallBack = func(pID uint16, complete bool) {
 		errs <- protoErr
-	}); err != nil {
+	}
+
+	if err := c.pubMsg([]byte("not a CONNECT first"), "topic", 0); err != nil {
 		t.Fatal(err)
 	}
 

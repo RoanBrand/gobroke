@@ -82,7 +82,7 @@ func (q *QoS12) Reset() {
 		q.remove(i)
 		delete(q.lookup, id)
 		i.P.FreeIfLastUser()
-		ReturnItem(i)
+		ReturnItemQos12(i)
 	}
 	q.h, q.t = nil, nil
 	q.Unlock()
@@ -93,7 +93,7 @@ func (q *QoS2Part2) Reset() {
 	for id, i := range q.lookup {
 		q.remove(i)
 		delete(q.lookup, id)
-		ReturnItem(i)
+		ReturnItemQos12(i)
 	}
 	q.h, q.t = nil, nil
 	q.Unlock()

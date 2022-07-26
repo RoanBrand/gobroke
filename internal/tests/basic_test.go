@@ -1,6 +1,7 @@
 package tests_test
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -18,11 +19,30 @@ func testRejoin(t *testing.T) {
 	gotPubID := false
 	topic := uuid.NewString()
 
-	for i := 0; i < 50; i++ {
+	type pubMsg struct {
+		topic string
+		msg   []byte
+		pId   uint16
+		qos   uint8
+		dup   bool
+	}
+
+	pubRx := make(chan pubMsg, 1)
+
+	rxHandler := func(pTopic, pMsg []byte, pID uint16, qos uint8, dup bool) {
+		pubRx <- pubMsg{string(topic), pMsg, pID, qos, dup}
+	}
+
+	errRx := func(pTopic, pMsg []byte, pID uint16, qos uint8, dup bool) {
+		errs <- fmt.Errorf("topic: %s msg: %s, pID: %d, qos: %d, dup %v", pTopic, pMsg, pID, qos, dup)
+	}
+
+	for i := 0; i < 10; i++ {
 		c1, err := dial(c1Name, false, sp1, errs)
 		if err != nil {
 			t.Fatal(err)
 		}
+		c1.pubReceiver = rxHandler
 
 		if oldC1 != nil { // prevent reaching max connections on system
 			oldC1.stop(false)
@@ -39,6 +59,7 @@ func testRejoin(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		c2.pubReceiver = errRx
 		sp2 = 1
 
 		if oldC2 != nil {
@@ -46,21 +67,21 @@ func testRejoin(t *testing.T) {
 			oldC2 = nil
 		}
 
-		err = c2.pubMsg([]byte("MSG"), topic, 1, nil)
+		err = c2.pubMsg([]byte("MSG"), topic, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		pub := <-c1.pubs
+		pub := <-pubRx
 		if !gotPubID {
-			c1PubReadId = pub.pID
+			c1PubReadId = pub.pId
 			gotPubID = true
 		}
-		if pub.topic != topic || pub.dup || pub.qos != 1 || pub.pID != c1PubReadId || string(pub.msg) != "MSG" {
+		if pub.topic != topic || pub.dup || pub.qos != 1 || pub.pId != c1PubReadId || string(pub.msg) != "MSG" {
 			t.Fatal("got pub:", pub, "pID must be:", c1PubReadId, "")
 		}
 
-		if err := c1.sendPuback(pub.pID); err != nil {
+		if err := c1.sendPuback(pub.pId); err != nil {
 			t.Fatal(err)
 		}
 		c1PubReadId++
@@ -75,22 +96,23 @@ func testRejoin(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		c1.pubReceiver = rxHandler
 		if oldC1 != nil {
 			oldC1.stop(false)
 			oldC1 = nil
 		}
 
-		err = c2.pubMsg([]byte("MSG"), topic, 1, nil)
+		err = c2.pubMsg([]byte("MSG"), topic, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		pub = <-c1.pubs
-		if pub.topic != topic || pub.dup || pub.qos != 1 || pub.pID != c1PubReadId || string(pub.msg) != "MSG" {
+		pub = <-pubRx
+		if pub.topic != topic || pub.dup || pub.qos != 1 || pub.pId != c1PubReadId || string(pub.msg) != "MSG" {
 			t.Fatal("got pub:", pub, "pID must be:", c1PubReadId, "")
 		}
 
-		if err := c1.sendPuback(pub.pID); err != nil {
+		if err := c1.sendPuback(pub.pId); err != nil {
 			t.Fatal(err)
 		}
 		c1PubReadId++
@@ -98,9 +120,7 @@ func testRejoin(t *testing.T) {
 		select {
 		case err := <-errs:
 			t.Fatal(err)
-		case pub := <-c1.pubs:
-			t.Fatal("unknown pub received:", pub, string(pub.msg))
-		case pub := <-c2.pubs:
+		case pub := <-pubRx:
 			t.Fatal("unknown pub received:", pub, string(pub.msg))
 		case <-time.After(time.Microsecond * 10):
 		}
