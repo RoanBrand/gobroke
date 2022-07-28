@@ -3,6 +3,7 @@ package tests_test
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/RoanBrand/gobroke"
 	"github.com/sirupsen/logrus"
@@ -22,6 +23,7 @@ func TestService(t *testing.T) {
 			errs <- err
 		}
 	}()
+	time.Sleep(time.Microsecond)
 
 	t.Run("cleansession and sessionpresent", testRejoin)
 	t.Run("new clients", testRejoin2)

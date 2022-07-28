@@ -219,7 +219,7 @@ func (s *Server) startDispatcher(l net.Listener) {
 // returns true if session is present and if state is reused.
 func (s *Server) addSession(ses *session) bool {
 	log.WithFields(log.Fields{
-		"clientId":     ses.clientId,
+		"ClientId":     ses.clientId,
 		"MQTT version": ses.protoVersion,
 	}).Info("New client connected")
 
@@ -230,7 +230,7 @@ func (s *Server) addSession(ses *session) bool {
 	if ok {
 		c.session.stop()
 		log.WithFields(log.Fields{
-			"clientId": ses.clientId,
+			"ClientId": ses.clientId,
 		}).Debug("Old session present")
 
 		if ses.persistent() && c.session.persistent() {
@@ -249,7 +249,7 @@ func (s *Server) addSession(ses *session) bool {
 
 	if sendSP {
 		log.WithFields(log.Fields{
-			"clientId": ses.clientId,
+			"ClientId": ses.clientId,
 		}).Debug("New connection inheriting previous session state")
 
 		if ses.protoVersion < 4 {
@@ -270,7 +270,7 @@ func (s *Server) removeSession(ses *session) {
 	}
 
 	log.WithFields(log.Fields{
-		"clientId": ses.clientId,
+		"ClientId": ses.clientId,
 	}).Debug("Deleting client session (CleanSession)")
 
 	s.removeClientSubscriptions(ses.client)

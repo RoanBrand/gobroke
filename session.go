@@ -58,19 +58,19 @@ func (s *session) run(retryInterval uint64) {
 
 	if err := c.q2Stage2.ResendAll(s.sendPubRel); err != nil {
 		log.WithFields(log.Fields{
-			"clientId": s.clientId,
+			"ClientId": s.clientId,
 			"err":      err,
 		}).Error("Unable to resend all pending QoS2 PUBRELs")
 	}
 	if err := c.q2.ResendAll(s.sendPublish); err != nil {
 		log.WithFields(log.Fields{
-			"clientId": s.clientId,
+			"ClientId": s.clientId,
 			"err":      err,
 		}).Error("Unable to resend all pending QoS2 PUBLISHs")
 	}
 	if err := c.q1.ResendAll(s.sendPublish); err != nil {
 		log.WithFields(log.Fields{
-			"clientId": s.clientId,
+			"ClientId": s.clientId,
 			"err":      err,
 		}).Error("Unable to resend all pending QoS1 PUBLISHs")
 	}
@@ -276,7 +276,7 @@ func (s *Server) startSession(conn net.Conn) {
 			// KeepAlive timeout
 			if strings.Contains(err.Error(), "i/o timeout") {
 				l := log.WithFields(log.Fields{
-					"clientId": ns.clientId,
+					"ClientId": ns.clientId,
 				})
 				if ns.connectSent {
 					l.Debug("KeepAlive timeout. Dropping connection")
@@ -287,7 +287,7 @@ func (s *Server) startSession(conn net.Conn) {
 			}
 
 			log.WithFields(log.Fields{
-				"clientId": ns.clientId,
+				"ClientId": ns.clientId,
 				"err":      err,
 			}).Error("TCP RX error")
 			return
@@ -298,9 +298,9 @@ func (s *Server) startSession(conn net.Conn) {
 				graceFullExit = true
 			} else {
 				log.WithFields(log.Fields{
-					"clientId": ns.clientId,
+					"ClientId": ns.clientId,
 					"err":      err,
-				}).Error("RX stream packet parse error")
+				}).Debug("client failure")
 			}
 			return
 		}
@@ -325,7 +325,7 @@ func (s *session) startWriter() {
 					}
 
 					log.WithFields(log.Fields{
-						"clientId": s.clientId,
+						"ClientId": s.clientId,
 						"err":      err,
 					}).Error("TCP TX error")
 					return

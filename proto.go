@@ -38,11 +38,8 @@ const (
 // Set to 0 to disable. Will always resend once on new conn.
 var pubTimeout uint64 = 50000
 
+// server got DISCONNECT packet. Do not send will on connection close.
 var errCleanExit = errors.New("cleanExit")
-
-func protocolViolation(msg string) error {
-	return errors.New("client protocol violation: " + msg)
-}
 
 func (s *Server) parseStream(ses *session, rx []byte) error {
 	p, l := &ses.packet, uint32(len(rx))
@@ -55,7 +52,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 			// [MQTT-3.1.0-1]
 			if !ses.connectSent && p.controlType != model.CONNECT {
-				return protocolViolation("first packet not CONNECT")
+				return errors.New("first packet not CONNECT")
 			}
 
 			switch p.controlType { // [MQTT-2.2.2-1, 2-2]
@@ -63,14 +60,14 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				rawQoS := p.flags & 0x06
 				if rawQoS == 0 {
 					if p.flags&0x08 > 0 { // [MQTT-3.3.1-2]
-						return protocolViolation("malformed PUBLISH - DUP set for QoS0 Pub")
+						return errors.New("malformed PUBLISH: DUP set for QoS0")
 					}
 				} else if rawQoS == 6 { // [MQTT-3.3.1-4]
-					return protocolViolation("malformed PUBLISH - No QoS3")
+					return errors.New("malformed PUBLISH: no QoS3 allowed")
 				}
 			case model.PUBACK, model.PUBREC, model.PUBCOMP, model.PINGREQ:
 				if p.flags != 0 {
-					return protocolViolation("malformed packet - Fixed header flags must be 0 (reserved)")
+					return errors.New("malformed packet: fixed header flags must be 0 (reserved)")
 				}
 			case model.PUBREL:
 				f := p.flags
@@ -78,7 +75,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					f &= 0x07
 				}
 				if f != 0x02 {
-					return protocolViolation("malformed PUBREL")
+					return errors.New("malformed PUBREL")
 				}
 			case model.SUBSCRIBE:
 				f := p.flags
@@ -86,7 +83,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					f &= 0x07
 				}
 				if f != 0x02 { // [MQTT-3.8.1-1]
-					return protocolViolation("malformed SUBSCRIBE")
+					return errors.New("malformed SUBSCRIBE")
 				}
 			case model.UNSUBSCRIBE:
 				f := p.flags
@@ -94,27 +91,27 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					f &= 0x07
 				}
 				if f != 0x02 { // [MQTT-3.10.1-1]
-					return protocolViolation("malformed UNSUBSCRIBE")
+					return errors.New("malformed UNSUBSCRIBE")
 				}
 			case model.DISCONNECT:
 				if p.flags != 0 {
-					return protocolViolation("malformed DISCONNECT - Fixed header flags must be 0 (reserved)")
+					return errors.New("malformed DISCONNECT: fixed header flags must be 0 (reserved)")
 				}
 
 				log.WithFields(log.Fields{
-					"clientId": ses.clientId,
-				}).Debug("Got DISCONNECT packet")
+					"ClientId": ses.clientId,
+				}).Debug("DISCONNECT received")
 
 				return errCleanExit
 			case model.CONNECT:
 				if ses.connectSent { // [MQTT-3.1.0-2]
-					return protocolViolation("second CONNECT packet")
+					return errors.New("second CONNECT packet received")
 				}
 				if p.flags != 0 {
-					return protocolViolation("malformed packet - Fixed header flags must be 0 (reserved)")
+					return errors.New("malformed packet: fixed header flags must be 0 (reserved)")
 				}
 			default:
-				return protocolViolation("invalid control packet")
+				return errors.New("invalid MQTT Control Packet type")
 			}
 
 			p.lenMul = 1
@@ -125,7 +122,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			p.remainingLength += uint32(rx[i]&127) * p.lenMul
 			p.lenMul *= 128
 			if p.lenMul > 128*128*128 {
-				return protocolViolation("malformed remaining length")
+				return errors.New("malformed packet: bad remaining length")
 			}
 
 			if rx[i]&128 == 0 {
@@ -136,12 +133,12 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					p.vhLen = 2
 				case model.SUBSCRIBE:
 					if p.remainingLength < 5 { // [MQTT-3.8.3-3]
-						return protocolViolation("invalid SUBSCRIBE - no topic filter")
+						return errors.New("malformed SUBSCRIBE: no Topic Filter present")
 					}
 					p.vhLen = 2
 				case model.UNSUBSCRIBE:
 					if p.remainingLength < 5 { // [MQTT-3.10.3-2]
-						return protocolViolation("invalid UNSUBSCRIBE - no topic filter")
+						return errors.New("malformed UNSUBSCRIBE: no Topic Filter present")
 					}
 					p.vhLen = 2
 				case model.PINGREQ:
@@ -200,7 +197,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					tLen := binary.BigEndian.Uint16(p.vh)
 					if tLen > 0 {
 						if err := checkUTF8(p.vh[2:2+tLen], true); err != nil { // [MQTT-3.3.2-1]
-							return protocolViolation("Invalid Publish Topic string: " + err.Error())
+							return errors.New("malformed PUBLISH: bad Topic Name: " + err.Error())
 						}
 					}
 					if p.flags&0x06 > 0 { // Qos > 0
@@ -231,23 +228,23 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 					if !bytes.Equal(protoVersionToName[ses.protoVersion], p.vh[2:2+pnLen]) { // [MQTT-3.1.2-1]
 						ses.sendConnack(1, false) // [MQTT-3.1.2-2]
-						return protocolViolation("unsupported client protocol. Must be MQTT 3 or 4")
+						return errors.New("unsupported client protocol. Must be MQTT v3.1 (3) or v3.1.1 (4)")
 					}
 
 					switch ses.protoVersion {
 					case 3:
 						if p.remainingLength < 3 {
-							return protocolViolation("invalid CONNECT - clientId must be between 1-23 characters long for MQTT 3")
+							return errors.New("invalid CONNECT: ClientId must be between 1-23 characters long for MQTT v3.1 (3)")
 						}
 					case 4:
 						if p.remainingLength < 2 { // [MQTT-3.1.3-3]
-							return protocolViolation("invalid CONNECT - absent clientId in payload")
+							return errors.New("malformed CONNECT: absent ClientId in payload")
 						}
 					}
 
 					ses.connectFlags = p.vh[3+pnLen]
 					if ses.connectFlags&0x01 > 0 { // [MQTT-3.1.2-3]
-						return protocolViolation("malformed CONNECT")
+						return errors.New("malformed CONNECT: reserved header flag must be 0")
 					}
 
 					// [MQTT-3.1.2-24]
@@ -316,24 +313,24 @@ func (s *Server) handleConnect(ses *session) error {
 	clientIdLen := uint32(binary.BigEndian.Uint16(p))
 	offs := 2 + clientIdLen
 	if pLen < offs {
-		return protocolViolation("malformed CONNECT payload too short clientId")
+		return errors.New("malformed CONNECT: payload too short for ClientId")
 	}
 
 	if clientIdLen > 0 {
 		if ses.protoVersion == 3 && clientIdLen > 23 {
 			ses.sendConnack(2, false)
-			return protocolViolation("clientId must be between 1-23 characters long for MQTT 3")
+			return errors.New("invalid CONNECT: ClientId must be between 1-23 characters long for MQTT v3.1 (3)")
 		}
 
 		if err := checkUTF8(p[2:offs], false); err != nil { // [MQTT-3.1.3-4]
-			return protocolViolation("malformed CONNECT clientId: " + err.Error())
+			return errors.New("malformed CONNECT: bad ClientId: " + err.Error())
 		}
 
 		ses.clientId = string(p[2:offs])
 	} else {
 		if ses.persistent() { // [MQTT-3.1.3-7]
 			ses.sendConnack(2, false) // [MQTT-3.1.3-8]
-			return protocolViolation("must have clientID when persistent session")
+			return errors.New("malformed CONNECT: must have ClientId present when persistent session")
 		}
 
 		newUnNamed := atomic.AddUint32(&unNamedClients, 1)
@@ -343,36 +340,36 @@ func (s *Server) handleConnect(ses *session) error {
 	// Will Topic & Msg
 	if ses.connectFlags&0x04 > 0 {
 		if pLen < 2+offs {
-			return protocolViolation("malformed CONNECT payload no will Topic")
+			return errors.New("malformed CONNECT: no Will Topic in payload")
 		}
 
 		wTopicUTFStart := offs
 		wTopicLen := uint32(binary.BigEndian.Uint16(p[offs:]))
 		offs += 2
 		if pLen < offs+wTopicLen {
-			return protocolViolation("malformed CONNECT payload too short will Topic")
+			return errors.New("malformed CONNECT: payload too short for Will Topic")
 		}
 
 		wTopicUTFEnd := offs + wTopicLen
 		offs += wTopicLen
 		if pLen < 2+offs {
-			return protocolViolation("malformed CONNECT payload no will Message")
+			return errors.New("malformed CONNECT: no Will Message in payload")
 		}
 
 		wTopicUTF8 := p[wTopicUTFStart:wTopicUTFEnd]
 		if err := checkUTF8(wTopicUTF8[2:], true); err != nil { // [MQTT-3.1.3-10]
-			return protocolViolation("malformed CONNECT Will Topic string: " + err.Error())
+			return errors.New("malformed CONNECT: bad Will Topic: " + err.Error())
 		}
 
 		wMsgLen := uint32(binary.BigEndian.Uint16(p[offs:]))
 		offs += 2
 		if pLen < offs+wMsgLen {
-			return protocolViolation("malformed CONNECT payload too short will Message")
+			return errors.New("malformed CONNECT: payload too short for Will Message")
 		}
 
 		wQoS := (ses.connectFlags & 0x18) >> 3
 		if wQoS > 2 { // [MQTT-3.1.2-14]
-			return protocolViolation("malformed CONNECT invalid will QoS level")
+			return errors.New("malformed CONNECT: invalid Will QoS level")
 		}
 
 		willPubFlags := wQoS << 1
@@ -384,24 +381,24 @@ func (s *Server) handleConnect(ses *session) error {
 		offs += wMsgLen
 
 	} else if ses.connectFlags&0x38 > 0 { // [MQTT-3.1.2-11, 2-13, 2-15]
-		return protocolViolation("malformed CONNECT will Flags")
+		return errors.New("malformed CONNECT: bad Will Flags")
 	}
 
 	// Username & Password
 	if ses.connectFlags&0x80 > 0 {
 		if pLen < 2+offs {
-			return protocolViolation("malformed CONNECT payload no username")
+			return errors.New("malformed CONNECT: no User Name in payload")
 		}
 
 		userLen := uint32(binary.BigEndian.Uint16(p[offs:]))
 		offs += 2
 		if pLen < offs+userLen {
-			return protocolViolation("malformed CONNECT payload too short username")
+			return errors.New("malformed CONNECT: payload too short for User Name")
 		}
 
 		userName := p[offs : offs+userLen]
 		if err := checkUTF8(userName, false); err != nil { // [MQTT-3.1.3-11]
-			return protocolViolation("malformed CONNECT User Name: " + err.Error())
+			return errors.New("malformed CONNECT: bad User Name: " + err.Error())
 		}
 
 		ses.userName = string(userName)
@@ -409,13 +406,13 @@ func (s *Server) handleConnect(ses *session) error {
 
 		if ses.connectFlags&0x40 > 0 {
 			if pLen < 2+offs {
-				return protocolViolation("malformed CONNECT payload no password")
+				return errors.New("malformed CONNECT: no Password in payload")
 			}
 
 			passLen := uint32(binary.BigEndian.Uint16(p[offs:]))
 			offs += 2
 			if pLen < offs+passLen {
-				return protocolViolation("malformed CONNECT payload too short password")
+				return errors.New("malformed CONNECT: payload too short for Password")
 			}
 
 			ses.password = make([]byte, passLen)
@@ -424,11 +421,11 @@ func (s *Server) handleConnect(ses *session) error {
 		}
 
 	} else if ses.connectFlags&0x40 > 0 {
-		return protocolViolation("malformed CONNECT password without username")
+		return errors.New("malformed CONNECT: Password present without User Name")
 	}
 
 	if offs != pLen {
-		return protocolViolation("malformed CONNECT: unexpected extra payload fields (Will Topic, Will Message, User Name or Password)")
+		return errors.New("malformed CONNECT: unexpected extra payload fields (Will Topic, Will Message, User Name or Password)")
 	}
 
 	if err := ses.conn.SetReadDeadline(time.Time{}); err != nil { // CONNECT packet timeout cancel
@@ -448,10 +445,9 @@ func (s *Server) handlePublish(ses *session) error {
 
 	if log.IsLevelEnabled(log.DebugLevel) {
 		lf := log.Fields{
-			"clientId":  ses.clientId,
-			"topicName": string(p.vh[2 : topicLen+2]),
-			"QoS":       pub.RxQoS(),
-			"payload":   string(p.payload),
+			"ClientId":   ses.clientId,
+			"Topic Name": string(p.vh[2 : topicLen+2]),
+			"QoS":        pub.RxQoS(),
 		}
 		if pub.Duplicate() {
 			lf["duplicate"] = true
@@ -459,7 +455,7 @@ func (s *Server) handlePublish(ses *session) error {
 		if pub.ToRetain() {
 			lf["retain"] = true
 		}
-		log.WithFields(lf).Debug("Got PUBLISH packet")
+		log.WithFields(lf).Debug("PUBLISH received")
 	}
 
 	c := ses.client
@@ -492,12 +488,12 @@ func (s *Server) handleSubscribe(ses *session) error {
 		i += 2
 		topicEnd := i + topicL
 		if p[topicEnd]&0xFC != 0 { // [MQTT-3-8.3-4]
-			return protocolViolation("malformed SUBSCRIBE")
+			return errors.New("malformed SUBSCRIBE: Reserved bits in payload must be 0")
 		}
 
 		topic := p[i:topicEnd]
 		if err := checkUTF8(topic, false); err != nil { // [MQTT-3.8.3-1]
-			return protocolViolation("malformed SUBSCRIBE Topic Filter string: " + err.Error())
+			return errors.New("malformed SUBSCRIBE: bad Topic Filter: " + err.Error())
 		}
 
 		topics, qoss = append(topics, bytes.Split(topic, []byte{'/'})), append(qoss, p[topicEnd])
@@ -505,9 +501,9 @@ func (s *Server) handleSubscribe(ses *session) error {
 	}
 
 	log.WithFields(log.Fields{
-		"clientId":     ses.clientId,
-		"topicFilters": topics,
-	}).Debug("Got SUBSCRIBE packet")
+		"ClientId":      ses.clientId,
+		"Topic Filters": topics,
+	}).Debug("SUBSCRIBE received")
 
 	s.addSubscriptions(ses.client, topics, qoss)
 
@@ -533,7 +529,7 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 		topicEnd := i + topicL
 		topic := p[i:topicEnd]
 		if err := checkUTF8(topic, false); err != nil { // [MQTT-3.10.3-1]
-			return protocolViolation("malformed UNSUBSCRIBE Topic Filter string: " + err.Error())
+			return errors.New("malformed UNSUBSCRIBE: bad Topic Filter: " + err.Error())
 		}
 
 		topics = append(topics, bytes.Split(topic, []byte{'/'}))
@@ -541,9 +537,9 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 	}
 
 	log.WithFields(log.Fields{
-		"clientId":     ses.clientId,
-		"topicFilters": topics,
-	}).Debug("Got UNSUBSCRIBE packet")
+		"ClientId":      ses.clientId,
+		"Topic Filters": topics,
+	}).Debug("UNSUBSCRIBE received")
 
 	c := ses.client
 	s.removeSubscriptions(c, topics)

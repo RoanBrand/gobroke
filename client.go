@@ -108,9 +108,9 @@ func (c *client) qos1Done(pID uint16) {
 	i := c.q1.Remove(pID)
 	if i == nil {
 		log.WithFields(log.Fields{
-			"clientId": c.session.clientId,
+			"ClientId": c.session.clientId,
 			"packetID": pID,
-		}).Error("Got PUBACK packet for none existing packet")
+		}).Debug("PUBACK received with unknown pId")
 		return
 	}
 
@@ -123,9 +123,9 @@ func (c *client) qos2Part1Done(pID uint16) bool {
 	i := c.q2.Remove(pID)
 	if i == nil {
 		log.WithFields(log.Fields{
-			"clientId": c.session.clientId,
+			"ClientId": c.session.clientId,
 			"packetID": pID,
-		}).Error("Got PUBREC packet for none existing packet")
+		}).Debug("PUBREC received with unknown pId")
 		return false
 	}
 
@@ -139,9 +139,9 @@ func (c *client) qos2Part2Done(pID uint16) {
 	i := c.q2Stage2.Remove(pID)
 	if i == nil {
 		log.WithFields(log.Fields{
-			"clientId": c.session.clientId,
+			"ClientId": c.session.clientId,
 			"packetID": pID,
-		}).Error("Got PUBCOMP packet for none existing packet")
+		}).Debug("PUBCOMP received with unknown pId")
 		return
 	}
 
