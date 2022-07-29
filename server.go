@@ -321,18 +321,18 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, qoss []uint8) {
 		var cTL *topL
 		var ok bool
 		for _, tl := range t {
-			tlStr := bytesToString(tl)
+			tlStr := bytesToStringUnsafe(tl)
 			// Server subscriptions
 			if sTL, ok = sLev[tlStr]; !ok {
 				sTL = &topicLevel{}
-				sLev[tlStr] = sTL
+				sLev[string(tl)] = sTL
 				sTL.init()
 			}
 
 			// Client's subscriptions
 			if cTL, ok = cLev[tlStr]; !ok {
 				cTL = &topL{}
-				cLev[tlStr] = cTL
+				cLev[string(tl)] = cTL
 				cTL.children = make(topT)
 			}
 
@@ -358,7 +358,7 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, qoss []uint8) {
 
 		var matchLevel func(retainTree, int)
 		matchLevel = func(l retainTree, n int) {
-			tlStr := bytesToString(t[n])
+			tlStr := bytesToStringUnsafe(t[n])
 			switch tlStr {
 			case "#":
 				forwardAll(l)
@@ -369,7 +369,7 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, qoss []uint8) {
 						forwardLevel(nl)
 					}
 				case 2:
-					if bytesToString(t[len(t)-1]) == "#" {
+					if t[len(t)-1][0] == '#' {
 						for _, nl := range l {
 							forwardLevel(nl)
 						}
@@ -390,7 +390,7 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, qoss []uint8) {
 				case 1:
 					forwardLevel(nl)
 				case 2:
-					if bytesToString(t[len(t)-1]) == "#" {
+					if t[len(t)-1][0] == '#' {
 						forwardLevel(nl)
 					}
 					fallthrough
@@ -417,7 +417,7 @@ loop:
 		sl, cl := s.subscriptions, c.subscriptions
 
 		for _, tl := range t {
-			tlStr := bytesToString(tl)
+			tlStr := bytesToStringUnsafe(tl)
 			// Server
 			if sTL, ok = sl[tlStr]; !ok {
 				continue loop // no one subscribed to this
@@ -444,7 +444,7 @@ func (s *Server) forwardToSubscribers(tl *topicLevel, p *model.PubMessage) {
 
 func (s *Server) matchTopicLevel(p *model.PubMessage, l topicTree, ln int) {
 	// direct match
-	if nl, ok := l[bytesToString(s.sepPubTopic[ln])]; ok {
+	if nl, ok := l[bytesToStringUnsafe(s.sepPubTopic[ln])]; ok {
 		if ln < len(s.sepPubTopic)-1 {
 			s.matchTopicLevel(p, nl.children, ln+1)
 		} else {
@@ -492,10 +492,9 @@ func (s *Server) matchSubscriptions(p *model.PubMessage) {
 	var nl *retainLevel
 	var ok bool
 	for _, tl := range s.sepPubTopic {
-		tlStr := bytesToString(tl)
-		if nl, ok = tr[tlStr]; !ok {
+		if nl, ok = tr[bytesToStringUnsafe(tl)]; !ok {
 			nl = &retainLevel{children: make(retainTree)}
-			tr[tlStr] = nl
+			tr[string(tl)] = nl
 		}
 
 		tr = nl.children
@@ -526,7 +525,8 @@ type retainLevel struct {
 
 type retainTree map[string]*retainLevel
 
-func bytesToString(b []byte) string {
+// DO NOT use result for making an entry in map
+func bytesToStringUnsafe(b []byte) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
 

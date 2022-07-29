@@ -496,14 +496,16 @@ func (s *Server) handleSubscribe(ses *session) error {
 			return errors.New("malformed SUBSCRIBE: bad Topic Filter: " + err.Error())
 		}
 
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.WithFields(log.Fields{
+				"ClientId":     ses.clientId,
+				"Topic Filter": string(topic),
+			}).Debug("SUBSCRIBE received")
+		}
+
 		topics, qoss = append(topics, bytes.Split(topic, []byte{'/'})), append(qoss, p[topicEnd])
 		i += 1 + topicL
 	}
-
-	log.WithFields(log.Fields{
-		"ClientId":      ses.clientId,
-		"Topic Filters": topics,
-	}).Debug("SUBSCRIBE received")
 
 	s.addSubscriptions(ses.client, topics, qoss)
 
@@ -532,14 +534,16 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 			return errors.New("malformed UNSUBSCRIBE: bad Topic Filter: " + err.Error())
 		}
 
+		if log.IsLevelEnabled(log.DebugLevel) {
+			log.WithFields(log.Fields{
+				"ClientId":     ses.clientId,
+				"Topic Filter": string(topic),
+			}).Debug("UNSUBSCRIBE received")
+		}
+
 		topics = append(topics, bytes.Split(topic, []byte{'/'}))
 		i += topicEnd
 	}
-
-	log.WithFields(log.Fields{
-		"ClientId":      ses.clientId,
-		"Topic Filters": topics,
-	}).Debug("UNSUBSCRIBE received")
 
 	c := ses.client
 	s.removeSubscriptions(c, topics)
