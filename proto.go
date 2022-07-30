@@ -14,15 +14,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var protoVersionToName = map[uint8][]byte{
-	3: {'M', 'Q', 'I', 's', 'd', 'p'},
-	4: {'M', 'Q', 'T', 'T'},
-}
-
-var (
-	pingRespPacket = []byte{model.PINGRESP, 0}
-)
-
 // MQTT packet parser states
 const (
 	// Fixed header
@@ -31,15 +22,28 @@ const (
 
 	variableHeaderLen
 	variableHeader
+	propertiesLenCONNECT
+	propertiesCONNECT
+
 	payload
 )
 
-// QoS 1&2 unacknowledged message resend timeout in ms
-// Set to 0 to disable. Will always resend once on new conn.
-var pubTimeout uint64 = 50000
+var (
+	protoVersionToName = map[uint8][]byte{
+		3: {'M', 'Q', 'I', 's', 'd', 'p'},
+		4: {'M', 'Q', 'T', 'T'},
+		5: {'M', 'Q', 'T', 'T'},
+	}
 
-// server got DISCONNECT packet. Do not send will on connection close.
-var errCleanExit = errors.New("cleanExit")
+	// QoS 1&2 unacknowledged message resend timeout in ms
+	// Set to 0 to disable. Will always resend once on new conn.
+	pubTimeout uint64 = 50000
+
+	pingRespPacket = []byte{model.PINGRESP, 0}
+
+	// server got DISCONNECT packet. Do not send will on connection close.
+	errCleanExit = errors.New("cleanExit")
+)
 
 func (s *Server) parseStream(ses *session, rx []byte) error {
 	p, l := &ses.packet, uint32(len(rx))
@@ -49,11 +53,6 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 		switch ses.rxState {
 		case controlAndFlags:
 			p.controlType, p.flags = rx[i]&0xF0, rx[i]&0x0F
-
-			// [MQTT-3.1.0-1]
-			if !ses.connectSent && p.controlType != model.CONNECT {
-				return errors.New("first packet not CONNECT")
-			}
 
 			switch p.controlType { // [MQTT-2.2.2-1, 2-2]
 			case model.PUBLISH:
@@ -114,14 +113,12 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				return errors.New("invalid MQTT Control Packet type")
 			}
 
-			p.lenMul = 1
-			p.remainingLength = 0
 			ses.rxState = length
+			p.remainingLength, p.lenMul = 0, 1
 			i++
 		case length:
 			p.remainingLength += uint32(rx[i]&127) * p.lenMul
-			p.lenMul *= 128
-			if p.lenMul > 128*128*128 {
+			if p.lenMul *= 128; p.lenMul > 128*128*128 {
 				return errors.New("malformed packet: bad remaining length")
 			}
 
@@ -180,9 +177,8 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 			i++
 		case variableHeader:
-			avail := l - i
 			toRead := p.vhLen
-			if avail < toRead {
+			if avail := l - i; avail < toRead {
 				toRead = avail
 			}
 
@@ -240,6 +236,10 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						if p.remainingLength < 2 { // [MQTT-3.1.3-3]
 							return errors.New("malformed CONNECT: absent ClientId in payload")
 						}
+					case 5:
+						if p.remainingLength < 3 {
+							return errors.New("malformed CONNECT: too short (missing Properties Length or ClientId")
+						}
 					}
 
 					ses.connectFlags = p.vh[3+pnLen]
@@ -261,15 +261,19 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					}
 					ses.rxState = controlAndFlags
 				} else {
-					ses.rxState = payload
+					if p.controlType == model.CONNECT && ses.protoVersion == 5 {
+						p.vhPropertyLen, p.lenMul = 0, 1
+						ses.rxState = propertiesLenCONNECT
+					} else {
+						ses.rxState = payload
+					}
 				}
 			}
 
 			i += toRead
 		case payload:
-			avail := l - i
 			toRead := p.remainingLength
-			if avail < toRead {
+			if avail := l - i; avail < toRead {
 				toRead = avail
 			}
 
@@ -297,7 +301,44 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			}
 
 			i += toRead
+		case propertiesLenCONNECT:
+			p.vhPropertyLen += uint32(rx[i]&127) * p.lenMul
+			if p.lenMul *= 128; p.lenMul > 128*128*128 {
+				return errors.New("malformed CONNECT: bad Properties Length")
+			}
+
+			if rx[i]&128 == 0 {
+				if p.vhPropertyLen == 0 {
+					ses.rxState = payload
+				} else {
+					p.vh = p.vh[:0]
+					ses.rxState = propertiesCONNECT
+				}
+			}
+
+			p.remainingLength--
+			i++
+		case propertiesCONNECT:
+			toRead := p.vhPropertyLen
+			if avail := l - i; avail < toRead {
+				toRead = avail
+			}
+
+			p.vh = append(p.vh, rx[i:i+toRead]...)
+			p.remainingLength -= toRead
+			p.vhPropertyLen -= toRead
+
+			if p.vhPropertyLen == 0 {
+				if err := s.handleConnectProperties(ses); err != nil {
+					return err
+				}
+
+				ses.rxState = payload
+			}
+
+			i += toRead
 		}
+
 	}
 
 	return nil
@@ -309,7 +350,7 @@ func (s *Server) handleConnect(ses *session) error {
 	p := ses.packet.payload
 	pLen := uint32(len(p))
 
-	// Client ID
+	// ClientId
 	clientIdLen := uint32(binary.BigEndian.Uint16(p))
 	offs := 2 + clientIdLen
 	if pLen < offs {
@@ -337,8 +378,24 @@ func (s *Server) handleConnect(ses *session) error {
 		ses.clientId = fmt.Sprintf("noname-%d-%d", newUnNamed, time.Now().UnixNano()/100000)
 	}
 
-	// Will Topic & Msg
+	// Will Properties, Will Topic & Will Message/Payload
 	if ses.connectFlags&0x04 > 0 {
+		// Properties
+		if ses.protoVersion == 5 {
+			len, lenMul := 0, 1
+			for done := false; !done; offs++ {
+				len += int(p[offs]&127) * lenMul
+				if lenMul *= 128; lenMul > 128*128*128 {
+					return errors.New("malformed CONNECT: bad Will Properties Length")
+				}
+
+				done = p[offs]&128 == 0
+			}
+
+			offs += uint32(len) // TODO: store and use Will Properties
+		}
+
+		// Topic
 		if pLen < 2+offs {
 			return errors.New("malformed CONNECT: no Will Topic in payload")
 		}
@@ -436,6 +493,10 @@ func (s *Server) handleConnect(ses *session) error {
 	ses.connectSent = true
 	ses.run(pubTimeout)
 	return nil
+}
+
+func (s *Server) handleConnectProperties(ses *session) error {
+	return nil // TODO: store and use Connect Properties
 }
 
 func (s *Server) handlePublish(ses *session) error {

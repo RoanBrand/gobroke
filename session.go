@@ -44,9 +44,10 @@ type packet struct {
 	lenMul          uint32
 
 	// Variable header
-	vhLen uint32
-	vh    []byte
-	pID   uint16 // subscribe, unsubscribe, publish with QoS>0.
+	vhLen         uint32
+	vhPropertyLen uint32
+	vh            []byte
+	pID           uint16 // subscribe, unsubscribe, publish with QoS>0.
 
 	payload []byte
 }
@@ -266,30 +267,43 @@ func (s *Server) startSession(conn net.Conn) {
 	}()
 
 	rx := make([]byte, 1024)
+
 	for {
 		nRx, err := conn.Read(rx)
 		if err != nil {
-			if err.Error() == "EOF" || errors.Is(err, net.ErrClosed) {
-				return
-			}
+			ns.readError(err)
+			return
+		}
 
-			// KeepAlive timeout
-			if strings.Contains(err.Error(), "i/o timeout") {
-				l := log.WithFields(log.Fields{
+		if nRx == 0 {
+			continue
+		}
+
+		// [MQTT-3.1.0-1]
+		if rx[0]&0xF0 != model.CONNECT {
+			log.Debug("first packet from new connection is not CONNECT")
+			return
+		}
+
+		if err = s.parseStream(&ns, rx[:nRx]); err != nil {
+			if err == errCleanExit {
+				graceFullExit = true
+			} else {
+				log.WithFields(log.Fields{
 					"ClientId": ns.clientId,
-				})
-				if ns.connectSent {
-					l.Debug("KeepAlive timeout. Dropping connection")
-				} else {
-					l.Debug("Timeout waiting for CONNECT. Dropping connection")
-				}
-				return
+					"err":      err,
+				}).Debug("client failure")
 			}
+			return
+		}
 
-			log.WithFields(log.Fields{
-				"ClientId": ns.clientId,
-				"err":      err,
-			}).Error("TCP RX error")
+		break
+	}
+
+	for {
+		nRx, err := conn.Read(rx)
+		if err != nil {
+			ns.readError(err)
 			return
 		}
 
@@ -305,6 +319,30 @@ func (s *Server) startSession(conn net.Conn) {
 			return
 		}
 	}
+}
+
+func (s *session) readError(err error) {
+	if err.Error() == "EOF" || errors.Is(err, net.ErrClosed) {
+		return
+	}
+
+	// KeepAlive timeout
+	if strings.Contains(err.Error(), "i/o timeout") {
+		l := log.WithFields(log.Fields{
+			"ClientId": s.clientId,
+		})
+		if s.connectSent {
+			l.Debug("KeepAlive timeout. Dropping connection")
+		} else {
+			l.Debug("Timeout waiting for CONNECT. Dropping connection")
+		}
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"ClientId": s.clientId,
+		"err":      err,
+	}).Error("TCP RX error")
 }
 
 func (s *session) startWriter() {
