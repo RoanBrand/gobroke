@@ -369,13 +369,14 @@ func (s *Server) handleConnect(ses *session) error {
 
 		ses.clientId = string(p[2:offs])
 	} else {
-		if ses.persistent() { // [MQTT-3.1.3-7]
+		if ses.protoVersion != 5 && ses.persistent() { // [MQTT-3.1.3-7]
 			ses.sendConnack(2, false) // [MQTT-3.1.3-8]
 			return errors.New("malformed CONNECT: must have ClientId present when persistent session")
 		}
 
 		newUnNamed := atomic.AddUint32(&unNamedClients, 1)
 		ses.clientId = fmt.Sprintf("noname-%d-%d", newUnNamed, time.Now().UnixNano()/100000)
+		ses.assignedCId = true
 	}
 
 	// Will Properties, Will Topic & Will Message/Payload
@@ -489,7 +490,16 @@ func (s *Server) handleConnect(ses *session) error {
 		return err
 	}
 
-	ses.sendConnack(0, s.addSession(ses)) // [MQTT-3.2.2-1, 2-2, 2-3]
+	sessionIsPresent := s.addSession(ses)
+	ses.stopped.Add(1)
+	go ses.startWriter()
+
+	if ses.protoVersion == 5 {
+		ses.sendConnack5(0, sessionIsPresent)
+	} else {
+		ses.sendConnack(0, sessionIsPresent) // [MQTT-3.2.2-1, 2-2, 2-3]
+	}
+
 	ses.connectSent = true
 	ses.run(pubTimeout)
 	return nil

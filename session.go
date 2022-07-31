@@ -27,6 +27,7 @@ type session struct {
 	stopped  sync.WaitGroup
 
 	clientId     string
+	assignedCId  bool
 	connectSent  bool
 	connectFlags byte
 	keepAlive    time.Duration
@@ -53,8 +54,6 @@ type packet struct {
 }
 
 func (s *session) run(retryInterval uint64) {
-	s.stopped.Add(1)
-	go s.startWriter()
 	c := s.client
 
 	if err := c.q2Stage2.ResendAll(s.sendPubRel); err != nil {
@@ -225,6 +224,35 @@ func (s *session) sendConnack(errCode uint8, SP bool) error {
 	}
 	_, err := s.conn.Write(p)
 	return err
+}
+
+func (s *session) sendConnack5(reasonCode uint8, sessionPresent bool) error {
+	props := []byte{
+		41, 0, // Sub Ids not supported yet
+		42, 0, // Shared subs not supported yet
+	}
+	if s.assignedCId {
+		props = append(props, 18, 0, 0)
+		binary.BigEndian.PutUint16(props[len(props)-2:], uint16(len(s.clientId)))
+		props = append(props, []byte(s.clientId)...)
+	}
+
+	propsVarLen := make([]byte, 0, 4)
+	propsVarLen = model.VariableLengthEncode(propsVarLen, len(props))
+
+	vh := []byte{0, reasonCode}
+	if sessionPresent {
+		vh[0] = 1
+	}
+
+	p := make([]byte, 1, 16)
+	p[0] = model.CONNACK
+	p = model.VariableLengthEncode(p, 2+len(propsVarLen)+len(props))
+	p = append(p, vh...)
+	p = append(p, propsVarLen...)
+	p = append(p, props...)
+
+	return s.writePacket(p)
 }
 
 func (s *session) persistent() bool {
