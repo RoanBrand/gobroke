@@ -29,7 +29,7 @@ func (q *QoS2Part2) Init() {
 
 func (q *QoS12) Add(i *Item) {
 	q.Lock()
-	q.add(i)
+	q.addDoubly(i)
 	//q.lookup[i.PId] = i
 	if q.toSend == nil {
 		q.toSend = i
@@ -42,7 +42,7 @@ func (q *QoS12) Add(i *Item) {
 func (q *QoS2Part2) Add(i *Item) {
 	q.Lock()
 	if _, ok := q.lookup[i.PId]; !ok {
-		q.add(i)
+		q.addDoubly(i)
 		q.lookup[i.PId] = i
 	} else {
 		ReturnItem(i)
@@ -54,7 +54,7 @@ func (q *QoS2Part2) Add(i *Item) {
 func (q *QoS12) Remove(id uint16) *Item {
 	q.Lock()
 	if i, ok := q.lookup[id]; ok {
-		q.remove(i)
+		q.removeDoubly(i)
 		delete(q.lookup, id)
 		q.Unlock()
 		return i
@@ -67,7 +67,7 @@ func (q *QoS12) Remove(id uint16) *Item {
 func (q *QoS2Part2) Remove(id uint16) *Item {
 	q.Lock()
 	if i, ok := q.lookup[id]; ok {
-		q.remove(i)
+		q.removeDoubly(i)
 		delete(q.lookup, id)
 		q.Unlock()
 		return i
@@ -79,7 +79,7 @@ func (q *QoS2Part2) Remove(id uint16) *Item {
 func (q *QoS12) Reset() {
 	q.Lock()
 	for id, i := range q.lookup {
-		q.remove(i)
+		q.removeDoubly(i)
 		delete(q.lookup, id)
 		i.P.FreeIfLastUser()
 		ReturnItemQos12(i)
@@ -91,7 +91,7 @@ func (q *QoS12) Reset() {
 func (q *QoS2Part2) Reset() {
 	q.Lock()
 	for id, i := range q.lookup {
-		q.remove(i)
+		q.removeDoubly(i)
 		delete(q.lookup, id)
 		ReturnItemQos12(i)
 	}
