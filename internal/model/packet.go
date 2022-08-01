@@ -48,3 +48,16 @@ func VariableLengthEncodeNoAlloc(l int, f func(eb byte) error) error {
 		}
 	}
 }
+
+func LengthToNumberOfVariableLengthBytes(l int) int {
+	switch {
+	case l < 128:
+		return 1
+	case l < 16384:
+		return 2
+	case l < 2097152:
+		return 3
+	default:
+		return 4
+	}
+}

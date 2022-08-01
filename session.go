@@ -129,6 +129,89 @@ func (s *session) updateTimeout() {
 	}
 }
 
+var connackProps = []byte{
+	41, 0, // Sub Ids not supported yet
+	42, 0, // Shared subs not supported yet
+}
+
+// Send CONNACK with success 0.
+func (s *session) sendConnackSuccess(sessionPresent bool) error {
+	if s.protoVersion < 5 {
+		s.client.txLock.Lock()
+
+		s.client.tx.WriteByte(model.CONNACK)
+		s.client.tx.WriteByte(2)
+		if sessionPresent {
+			s.client.tx.WriteByte(1)
+		} else {
+			s.client.tx.WriteByte(0)
+		}
+		err := s.client.tx.WriteByte(0) // success
+
+		s.client.txLock.Unlock()
+		s.client.notifyFlusher()
+		return err
+	}
+
+	propsLen := len(connackProps)
+	if s.assignedCId {
+		propsLen += 3 + len(s.clientId)
+	}
+
+	rl := 2 + model.LengthToNumberOfVariableLengthBytes(propsLen) + propsLen
+
+	s.client.txLock.Lock()
+
+	s.client.tx.WriteByte(model.CONNACK)
+
+	model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
+		return s.client.tx.WriteByte(eb)
+	})
+
+	if sessionPresent {
+		s.client.tx.WriteByte(1)
+	} else {
+		s.client.tx.WriteByte(0)
+	}
+
+	s.client.tx.WriteByte(0) // success
+
+	model.VariableLengthEncodeNoAlloc(propsLen, func(eb byte) error {
+		return s.client.tx.WriteByte(eb)
+	})
+
+	_, err := s.client.tx.Write(connackProps)
+
+	if s.assignedCId {
+		s.client.tx.WriteByte(18)
+		cIdLen := uint16(len(s.clientId))
+		s.client.tx.WriteByte(byte(cIdLen >> 8))
+		s.client.tx.WriteByte(byte(cIdLen))
+		_, err = s.client.tx.WriteString(s.clientId)
+	}
+
+	s.client.txLock.Unlock()
+	s.client.notifyFlusher()
+	return err
+}
+
+// direct write to conn as writer not started yet
+func (s *session) sendConnackFail(reasonCode uint8) error {
+	// use packet.vhBuf as buffer, as won't be used anymore
+	p := s.packet.vhBuf
+	p[0], p[2], p[3] = model.CONNACK, 0, reasonCode
+
+	if s.protoVersion < 5 {
+		p[1] = 2
+		_, err := s.conn.Write(p[:4])
+		return err
+	}
+
+	p[1], p[4] = 3, 0
+	_, err := s.conn.Write(p[:5])
+	return err
+}
+
 func (s *session) sendPublish(i *queue.Item) error {
 	var publish byte = model.PUBLISH
 
@@ -346,51 +429,11 @@ func (s *session) sendUnsuback(nTopics int) error {
 		for i := 0; i < nTopics; i++ {
 			err = s.client.tx.WriteByte(0) // TODO: support reason codes
 		}
-
 	}
 
 	s.client.txLock.Unlock()
 	s.client.notifyFlusher()
 	return err
-}
-
-// Send CONNACK with optional Session Present flag.
-func (s *session) sendConnack(errCode uint8, SP bool) error {
-	p := []byte{model.CONNACK, 2, 0, errCode}
-	if SP {
-		p[2] = 1
-	}
-	_, err := s.conn.Write(p)
-	return err
-}
-
-func (s *session) sendConnack5(reasonCode uint8, sessionPresent bool) error {
-	props := []byte{
-		41, 0, // Sub Ids not supported yet
-		42, 0, // Shared subs not supported yet
-	}
-	if s.assignedCId {
-		props = append(props, 18, 0, 0)
-		binary.BigEndian.PutUint16(props[len(props)-2:], uint16(len(s.clientId)))
-		props = append(props, []byte(s.clientId)...)
-	}
-
-	propsVarLen := make([]byte, 0, 4)
-	propsVarLen = model.VariableLengthEncode(propsVarLen, len(props))
-
-	vh := []byte{0, reasonCode}
-	if sessionPresent {
-		vh[0] = 1
-	}
-
-	p := make([]byte, 1, 16)
-	p[0] = model.CONNACK
-	p = model.VariableLengthEncode(p, 2+len(propsVarLen)+len(props))
-	p = append(p, vh...)
-	p = append(p, propsVarLen...)
-	p = append(p, props...)
-
-	return s.writePacket(p)
 }
 
 func (s *session) persistent() bool {

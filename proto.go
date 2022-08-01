@@ -264,8 +264,13 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					ses.protoVersion = p.vhBuf[2+pnLen]
 
 					if !bytes.Equal(protoVersionToName[ses.protoVersion], p.vhBuf[2:2+pnLen]) { // [MQTT-3.1.2-1]
-						ses.sendConnack(1, false) // [MQTT-3.1.2-2]
-						return errors.New("unsupported client protocol. Must be MQTT v3.1 (3) or v3.1.1 (4)")
+						if ses.protoVersion < 5 {
+							ses.sendConnackFail(1) // [MQTT-3.1.2-2]
+						} else {
+							ses.sendConnackFail(132)
+						}
+
+						return errors.New("unsupported client protocol. Must be MQTT v3.1 (3), v3.1.1 (4) or v5 (5)")
 					}
 
 					switch ses.protoVersion {
@@ -663,7 +668,7 @@ func (s *Server) handleConnect(ses *session) error {
 
 	if clientIdLen > 0 {
 		if ses.protoVersion == 3 && clientIdLen > 23 {
-			ses.sendConnack(2, false)
+			ses.sendConnackFail(2)
 			return errors.New("invalid CONNECT: ClientId must be between 1-23 characters long for MQTT v3.1 (3)")
 		}
 
@@ -673,8 +678,8 @@ func (s *Server) handleConnect(ses *session) error {
 
 		ses.clientId = string(p[2:offs])
 	} else {
-		if ses.protoVersion != 5 && ses.persistent() { // [MQTT-3.1.3-7]
-			ses.sendConnack(2, false) // [MQTT-3.1.3-8]
+		if ses.protoVersion < 5 && ses.persistent() { // [MQTT-3.1.3-7]
+			ses.sendConnackFail(2) // [MQTT-3.1.3-8]
 			return errors.New("malformed CONNECT: must have ClientId present when persistent session")
 		}
 
@@ -798,11 +803,8 @@ func (s *Server) handleConnect(ses *session) error {
 	ses.stopped.Add(1)
 	go ses.startWriter()
 
-	if ses.protoVersion == 5 {
-		ses.sendConnack5(0, sessionIsPresent)
-	} else {
-		ses.sendConnack(0, sessionIsPresent) // [MQTT-3.2.2-1, 2-2, 2-3]
-	}
+	// [MQTT-3.2.2-1, 2-2, 2-3]
+	ses.sendConnackSuccess(sessionIsPresent)
 
 	ses.connectSent = true
 	ses.run()
