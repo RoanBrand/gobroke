@@ -14,15 +14,6 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var protoVersionToName = map[uint8][]byte{
-	3: {'M', 'Q', 'I', 's', 'd', 'p'},
-	4: {'M', 'Q', 'T', 'T'},
-}
-
-var (
-	pingRespPacket = []byte{model.PINGRESP, 0}
-)
-
 // MQTT packet parser states
 const (
 	// Fixed header
@@ -31,15 +22,27 @@ const (
 
 	variableHeaderLen
 	variableHeader
+
+	propertiesLen
+	properties
+
 	payload
 )
 
-// QoS 1&2 unacknowledged message resend timeout in ms
-// Set to 0 to disable. Will always resend once on new conn.
-var pubTimeout uint64 = 50000
+const maxVarLenMul = 128 * 128 * 128
 
-// server got DISCONNECT packet. Do not send will on connection close.
-var errCleanExit = errors.New("cleanExit")
+var (
+	protoVersionToName = map[uint8][]byte{
+		3: {'M', 'Q', 'I', 's', 'd', 'p'},
+		4: {'M', 'Q', 'T', 'T'},
+		5: {'M', 'Q', 'T', 'T'},
+	}
+
+	pingRespPacket = []byte{model.PINGRESP, 0}
+
+	// server got DISCONNECT packet. Do not send will on connection close.
+	errCleanExit = errors.New("cleanExit")
+)
 
 func (s *Server) parseStream(ses *session, rx []byte) error {
 	p, l := &ses.packet, uint32(len(rx))
@@ -50,21 +53,9 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 		case controlAndFlags:
 			p.controlType, p.flags = rx[i]&0xF0, rx[i]&0x0F
 
-			// [MQTT-3.1.0-1]
-			if !ses.connectSent && p.controlType != model.CONNECT {
-				return errors.New("first packet not CONNECT")
-			}
-
 			switch p.controlType { // [MQTT-2.2.2-1, 2-2]
 			case model.PUBLISH:
-				rawQoS := p.flags & 0x06
-				if rawQoS == 0 {
-					if p.flags&0x08 > 0 { // [MQTT-3.3.1-2]
-						return errors.New("malformed PUBLISH: DUP set for QoS0")
-					}
-				} else if rawQoS == 6 { // [MQTT-3.3.1-4]
-					return errors.New("malformed PUBLISH: no QoS3 allowed")
-				}
+				break
 			case model.PUBACK, model.PUBREC, model.PUBCOMP, model.PINGREQ:
 				if p.flags != 0 {
 					return errors.New("malformed packet: fixed header flags must be 0 (reserved)")
@@ -83,7 +74,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					f &= 0x07
 				}
 				if f != 0x02 { // [MQTT-3.8.1-1]
-					return errors.New("malformed SUBSCRIBE")
+					return errors.New("malformed SUBSCRIBE: bad fixed header reserved flags")
 				}
 			case model.UNSUBSCRIBE:
 				f := p.flags
@@ -91,7 +82,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					f &= 0x07
 				}
 				if f != 0x02 { // [MQTT-3.10.1-1]
-					return errors.New("malformed UNSUBSCRIBE")
+					return errors.New("malformed UNSUBSCRIBE: bad fixed header reserved flags")
 				}
 			case model.DISCONNECT:
 				if p.flags != 0 {
@@ -114,121 +105,167 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				return errors.New("invalid MQTT Control Packet type")
 			}
 
-			p.lenMul = 1
-			p.remainingLength = 0
 			ses.rxState = length
+			p.lenMul = 1
 			i++
 		case length:
 			p.remainingLength += uint32(rx[i]&127) * p.lenMul
-			p.lenMul *= 128
-			if p.lenMul > 128*128*128 {
+			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
 				return errors.New("malformed packet: bad remaining length")
 			}
 
 			if rx[i]&128 == 0 {
 				switch p.controlType {
 				case model.PUBLISH, model.CONNECT:
-					p.vhLen = 0 // determined later
+					p.vhToRead = 2
+					p.vhBuf = p.vhBuf[:0]
+					ses.rxState = variableHeaderLen
 				case model.PUBACK, model.PUBREC, model.PUBREL, model.PUBCOMP:
-					p.vhLen = 2
+					p.vhToRead = 2
+					if ses.protoVersion == 5 && p.remainingLength > 2 {
+						p.vhToRead++ // Reason Code
+					}
+
+					p.vhBuf = p.vhBuf[:0]
+					ses.rxState = variableHeader
 				case model.SUBSCRIBE:
-					if p.remainingLength < 5 { // [MQTT-3.8.3-3]
+					// [MQTT-3.8.3-3]
+					if p.remainingLength < 5 || (ses.protoVersion == 5 && p.remainingLength < 6) {
 						return errors.New("malformed SUBSCRIBE: no Topic Filter present")
 					}
-					p.vhLen = 2
+
+					p.vhToRead = 2
+					p.vhBuf = p.vhBuf[:0]
+					ses.rxState = variableHeader
 				case model.UNSUBSCRIBE:
-					if p.remainingLength < 5 { // [MQTT-3.10.3-2]
+					if p.remainingLength < 4 || (ses.protoVersion == 5 && p.remainingLength < 5) { // [MQTT-3.10.3-2]
 						return errors.New("malformed UNSUBSCRIBE: no Topic Filter present")
 					}
-					p.vhLen = 2
+
+					p.vhToRead = 2
+					p.vhBuf = p.vhBuf[:0]
+					ses.rxState = variableHeader
 				case model.PINGREQ:
 					if err := ses.writePacket(pingRespPacket); err != nil {
 						return err
 					}
-				}
 
-				if p.remainingLength == 0 {
 					ses.updateTimeout()
 					ses.rxState = controlAndFlags
-				} else {
-					p.vh = p.vh[:0]
-					if p.controlType == model.PUBLISH || p.controlType == model.CONNECT {
-						ses.rxState = variableHeaderLen
-					} else {
-						ses.rxState = variableHeader
-					}
 				}
 			}
 
 			i++
 		case variableHeaderLen:
-			p.vh = append(p.vh, rx[i])
-			p.vhLen++
-			p.remainingLength--
+			toRead := p.vhToRead
+			if avail := l - i; avail < toRead {
+				toRead = avail
+			}
 
-			if p.vhLen == 2 {
-				p.vhLen = uint32(binary.BigEndian.Uint16(p.vh)) // vhLen is now remaining
+			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
+			p.vhToRead -= toRead
+			p.remainingLength -= toRead
+
+			if p.vhToRead == 0 {
+				p.vhToRead = uint32(binary.BigEndian.Uint16(p.vhBuf))
 				if p.controlType == model.PUBLISH {
-					if p.flags&0x06 > 0 { // Qos > 0
-						p.vhLen += 2
+					rawQoS := p.flags & 0x06
+					if rawQoS > 0 { // Qos > 0
+						if rawQoS == 6 { // [MQTT-3.3.1-4]
+							return errors.New("malformed PUBLISH: no QoS3 allowed")
+						}
+
+						p.vhToRead += 2
+					} else if p.flags&0x08 > 0 { // [MQTT-3.3.1-2]
+						return errors.New("malformed PUBLISH: DUP set for QoS0")
 					}
+
 				} else { // CONNECT
-					p.vhLen += 4 // ProtoVersion + ConnectFlags + KeepAlive
+					p.vhToRead += 4 // ProtoVersion + ConnectFlags + KeepAlive
 				}
 				ses.rxState = variableHeader
 			}
 
-			i++
+			i += toRead
 		case variableHeader:
-			avail := l - i
-			toRead := p.vhLen
-			if avail < toRead {
+			toRead := p.vhToRead
+			if avail := l - i; avail < toRead {
 				toRead = avail
 			}
 
-			p.vh = append(p.vh, rx[i:i+toRead]...)
+			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
 			p.remainingLength -= toRead
-			p.vhLen -= toRead
+			p.vhToRead -= toRead
 
-			if p.vhLen == 0 {
+			if p.vhToRead == 0 {
 				c := ses.client
 				switch p.controlType {
 				case model.PUBLISH:
-					tLen := binary.BigEndian.Uint16(p.vh)
+					tLen := binary.BigEndian.Uint16(p.vhBuf)
 					if tLen > 0 {
-						if err := checkUTF8(p.vh[2:2+tLen], true); err != nil { // [MQTT-3.3.2-1]
+						if err := checkUTF8(p.vhBuf[2:2+tLen], true); err != nil { // [MQTT-3.3.2-1]
 							return errors.New("malformed PUBLISH: bad Topic Name: " + err.Error())
 						}
 					}
 					if p.flags&0x06 > 0 { // Qos > 0
-						p.pID = binary.BigEndian.Uint16(p.vh[len(p.vh)-2:])
+						p.pID = binary.BigEndian.Uint16(p.vhBuf[2+tLen:])
 					}
 				case model.PUBACK:
-					c.qos1Done(binary.BigEndian.Uint16(p.vh))
-				case model.PUBREC:
-					c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBREL|0x02, 2, p.vh[0], p.vh[1]
-					pID := binary.BigEndian.Uint16(p.vh)
-					if !c.qos2Part1Done(pID) && ses.protoVersion == 3 && c.q2Stage2.Present(pID) {
-						c.acks[0] |= 0x08 // set Dup
+					if p.remainingLength == 0 {
+						c.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
 					}
-					if err := ses.writePacket(c.acks); err != nil {
-						return err
+					if len(p.vhBuf) > 2 && ses.protoVersion == 5 && p.vhBuf[2] != 0 {
+						log.WithFields(log.Fields{
+							"ClientId":    ses.clientId,
+							"Reason Code": p.vhBuf[2],
+						}).Debug("PUBACK received")
+					}
+				case model.PUBREC:
+					if p.remainingLength == 0 {
+						if err := ses.handlePubrec(); err != nil {
+							return err
+						}
+					}
+					if len(p.vhBuf) > 2 && ses.protoVersion == 5 && p.vhBuf[2] != 0 {
+						log.WithFields(log.Fields{
+							"ClientId":    ses.clientId,
+							"Reason Code": p.vhBuf[2],
+						}).Debug("PUBREC received")
 					}
 				case model.PUBREL: // [MQTT-4.3.3-2]
-					delete(c.q2RxLookup, binary.BigEndian.Uint16(p.vh))
-					c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBCOMP, 2, p.vh[0], p.vh[1]
-					if err := ses.writePacket(c.acks); err != nil {
-						return err
+					if p.remainingLength == 0 {
+						if err := ses.handlePubrel(); err != nil {
+							return err
+						}
+					}
+					if len(p.vhBuf) > 2 && ses.protoVersion == 5 && p.vhBuf[2] != 0 {
+						log.WithFields(log.Fields{
+							"ClientId":    ses.clientId,
+							"Reason Code": p.vhBuf[2],
+						}).Debug("PUBREL received")
 					}
 				case model.PUBCOMP:
-					c.qos2Part2Done(binary.BigEndian.Uint16(p.vh))
+					if p.remainingLength == 0 {
+						c.qos2Part2Done(binary.BigEndian.Uint16(p.vhBuf))
+					}
+					if len(p.vhBuf) > 2 && ses.protoVersion == 5 && p.vhBuf[2] != 0 {
+						log.WithFields(log.Fields{
+							"ClientId":    ses.clientId,
+							"Reason Code": p.vhBuf[2],
+						}).Debug("PUBCOMP received")
+					}
 				case model.CONNECT:
-					pnLen := binary.BigEndian.Uint16(p.vh)
-					ses.protoVersion = p.vh[2+pnLen]
+					pnLen := binary.BigEndian.Uint16(p.vhBuf)
+					ses.protoVersion = p.vhBuf[2+pnLen]
 
-					if !bytes.Equal(protoVersionToName[ses.protoVersion], p.vh[2:2+pnLen]) { // [MQTT-3.1.2-1]
-						ses.sendConnack(1, false) // [MQTT-3.1.2-2]
-						return errors.New("unsupported client protocol. Must be MQTT v3.1 (3) or v3.1.1 (4)")
+					if !bytes.Equal(protoVersionToName[ses.protoVersion], p.vhBuf[2:2+pnLen]) { // [MQTT-3.1.2-1]
+						if ses.protoVersion < 5 {
+							ses.sendConnackFail(1) // [MQTT-3.1.2-2]
+						} else {
+							ses.sendConnackFail(132)
+						}
+
+						return errors.New("unsupported client protocol. Must be MQTT v3.1 (3), v3.1.1 (4) or v5 (5)")
 					}
 
 					switch ses.protoVersion {
@@ -240,15 +277,19 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						if p.remainingLength < 2 { // [MQTT-3.1.3-3]
 							return errors.New("malformed CONNECT: absent ClientId in payload")
 						}
+					case 5:
+						if p.remainingLength < 3 {
+							return errors.New("malformed CONNECT: too short (missing Properties Length or ClientId")
+						}
 					}
 
-					ses.connectFlags = p.vh[3+pnLen]
+					ses.connectFlags = p.vhBuf[3+pnLen]
 					if ses.connectFlags&0x01 > 0 { // [MQTT-3.1.2-3]
 						return errors.New("malformed CONNECT: reserved header flag must be 0")
 					}
 
 					// [MQTT-3.1.2-24]
-					ses.keepAlive = time.Duration(binary.BigEndian.Uint16(p.vh[4+pnLen:])) * time.Second * 3 / 2
+					ses.keepAlive = time.Duration(binary.BigEndian.Uint16(p.vhBuf[4+pnLen:])) * time.Second * 3 / 2
 				}
 
 				p.payload = p.payload[:0]
@@ -260,6 +301,9 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						}
 					}
 					ses.rxState = controlAndFlags
+				} else if ses.protoVersion == 5 {
+					p.lenMul = 1
+					ses.rxState = propertiesLen
 				} else {
 					ses.rxState = payload
 				}
@@ -267,9 +311,8 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 			i += toRead
 		case payload:
-			avail := l - i
 			toRead := p.remainingLength
-			if avail < toRead {
+			if avail := l - i; avail < toRead {
 				toRead = avail
 			}
 
@@ -297,6 +340,99 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			}
 
 			i += toRead
+		case propertiesLen:
+			p.vhPropertyLen += uint32(rx[i]&127) * p.lenMul
+			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
+				return errors.New("malformed packet: bad Properties Length")
+			}
+
+			if rx[i]&128 == 0 {
+				if p.vhPropertyLen == 0 {
+					switch p.controlType {
+					case model.PUBLISH:
+						ses.rxState = payload
+					case model.PUBACK:
+						ses.client.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
+						ses.rxState = controlAndFlags
+					case model.PUBREC:
+						if err := ses.handlePubrec(); err != nil {
+							return err
+						}
+						ses.rxState = controlAndFlags
+					case model.PUBREL:
+						if err := ses.handlePubrel(); err != nil {
+							return err
+						}
+						ses.rxState = controlAndFlags
+					case model.PUBCOMP:
+						ses.client.qos2Part2Done(binary.BigEndian.Uint16(p.vhBuf))
+						ses.rxState = controlAndFlags
+					default: // subscribe, unsubscribe, connect
+						ses.rxState = payload
+					}
+				} else {
+					ses.rxState = properties
+				}
+			}
+
+			p.remainingLength--
+			i++
+		case properties:
+			toRead := p.vhPropertyLen
+			if avail := l - i; avail < toRead {
+				toRead = avail
+			}
+
+			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
+			p.remainingLength -= toRead
+			p.vhPropertyLen -= toRead
+
+			if p.vhPropertyLen == 0 {
+				switch p.controlType {
+				case model.PUBLISH:
+					if err := s.handlePublishProperties(ses); err != nil {
+						return err
+					}
+					ses.rxState = payload
+				case model.PUBACK:
+					// TODO: handle PUBACK props
+					ses.client.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
+					ses.rxState = controlAndFlags
+				case model.PUBREC:
+					// TODO: handle PUBREC props
+					if err := ses.handlePubrec(); err != nil {
+						return err
+					}
+					ses.rxState = controlAndFlags
+				case model.PUBREL:
+					// TODO: handle PUBREL props
+					if err := ses.handlePubrel(); err != nil {
+						return err
+					}
+					ses.rxState = controlAndFlags
+				case model.PUBCOMP:
+					// TODO: handle PUBCOMP props
+					ses.client.qos2Part2Done(binary.BigEndian.Uint16(p.vhBuf))
+					ses.rxState = controlAndFlags
+				case model.SUBSCRIBE:
+					if err := s.handleSubscribeProperties(ses); err != nil {
+						return err
+					}
+					ses.rxState = payload
+				case model.UNSUBSCRIBE:
+					if err := s.handleUnSubscribeProperties(ses); err != nil {
+						return err
+					}
+					ses.rxState = payload
+				case model.CONNECT:
+					if err := s.handleConnectProperties(ses); err != nil {
+						return err
+					}
+					ses.rxState = payload
+				}
+			}
+
+			i += toRead
 		}
 	}
 
@@ -309,7 +445,7 @@ func (s *Server) handleConnect(ses *session) error {
 	p := ses.packet.payload
 	pLen := uint32(len(p))
 
-	// Client ID
+	// ClientId
 	clientIdLen := uint32(binary.BigEndian.Uint16(p))
 	offs := 2 + clientIdLen
 	if pLen < offs {
@@ -318,7 +454,7 @@ func (s *Server) handleConnect(ses *session) error {
 
 	if clientIdLen > 0 {
 		if ses.protoVersion == 3 && clientIdLen > 23 {
-			ses.sendConnack(2, false)
+			ses.sendConnackFail(2)
 			return errors.New("invalid CONNECT: ClientId must be between 1-23 characters long for MQTT v3.1 (3)")
 		}
 
@@ -328,17 +464,34 @@ func (s *Server) handleConnect(ses *session) error {
 
 		ses.clientId = string(p[2:offs])
 	} else {
-		if ses.persistent() { // [MQTT-3.1.3-7]
-			ses.sendConnack(2, false) // [MQTT-3.1.3-8]
+		if ses.protoVersion < 5 && ses.persistent() { // [MQTT-3.1.3-7]
+			ses.sendConnackFail(2) // [MQTT-3.1.3-8]
 			return errors.New("malformed CONNECT: must have ClientId present when persistent session")
 		}
 
 		newUnNamed := atomic.AddUint32(&unNamedClients, 1)
 		ses.clientId = fmt.Sprintf("noname-%d-%d", newUnNamed, time.Now().UnixNano()/100000)
+		ses.assignedCId = true
 	}
 
-	// Will Topic & Msg
+	// Will Properties, Will Topic & Will Message/Payload
 	if ses.connectFlags&0x04 > 0 {
+		// Properties
+		if ses.protoVersion == 5 {
+			len, lenMul := 0, 1
+			for done := false; !done; offs++ {
+				len += int(p[offs]&127) * lenMul
+				if lenMul *= 128; lenMul > maxVarLenMul {
+					return errors.New("malformed CONNECT: bad Will Properties Length")
+				}
+
+				done = p[offs]&128 == 0
+			}
+
+			offs += uint32(len) // TODO: store and use Will Properties
+		}
+
+		// Topic
 		if pLen < 2+offs {
 			return errors.New("malformed CONNECT: no Will Topic in payload")
 		}
@@ -432,21 +585,31 @@ func (s *Server) handleConnect(ses *session) error {
 		return err
 	}
 
-	ses.sendConnack(0, s.addSession(ses)) // [MQTT-3.2.2-1, 2-2, 2-3]
+	sessionIsPresent := s.addSession(ses)
+	ses.stopped.Add(1)
+	go ses.startWriter()
+
+	// [MQTT-3.2.2-1, 2-2, 2-3]
+	ses.sendConnackSuccess(sessionIsPresent)
+
 	ses.connectSent = true
-	ses.run(pubTimeout)
+	ses.run()
 	return nil
+}
+
+func (s *Server) handleConnectProperties(ses *session) error {
+	return nil // TODO: store and use Connect Properties
 }
 
 func (s *Server) handlePublish(ses *session) error {
 	p := &ses.packet
-	topicLen := binary.BigEndian.Uint16(p.vh)
-	pub := model.NewPub(p.flags, p.vh[:topicLen+2], p.payload)
+	topicLen := binary.BigEndian.Uint16(p.vhBuf)
+	pub := model.NewPub(p.flags, p.vhBuf[:topicLen+2], p.payload)
 
 	if log.IsLevelEnabled(log.DebugLevel) {
 		lf := log.Fields{
 			"ClientId":   ses.clientId,
-			"Topic Name": string(p.vh[2 : topicLen+2]),
+			"Topic Name": string(p.vhBuf[2 : topicLen+2]),
 			"QoS":        pub.RxQoS(),
 		}
 		if pub.Duplicate() {
@@ -458,24 +621,25 @@ func (s *Server) handlePublish(ses *session) error {
 		log.WithFields(lf).Debug("PUBLISH received")
 	}
 
-	c := ses.client
 	switch pub.RxQoS() {
 	case 0:
 		s.pubs.Add(queue.GetItem(pub))
 	case 1:
 		s.pubs.Add(queue.GetItem(pub))
-		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBACK, 2, byte(p.pID>>8), byte(p.pID)
-		return ses.writePacket(c.acks)
+		return ses.sendPuback(p.pID)
 	case 2: // [MQTT-4.3.3-2]
-		if _, ok := c.q2RxLookup[p.pID]; !ok {
-			c.q2RxLookup[p.pID] = struct{}{}
+		if _, ok := ses.client.q2RxLookup[p.pID]; !ok {
+			ses.client.q2RxLookup[p.pID] = struct{}{}
 			s.pubs.Add(queue.GetItem(pub))
 		}
-		c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBREC, 2, byte(p.pID>>8), byte(p.pID)
-		return ses.writePacket(c.acks)
+		return ses.sendPubrec(p.pID)
 	}
 
 	return nil
+}
+
+func (s *Server) handlePublishProperties(ses *session) error {
+	return nil // TODO: store and use Publish Properties
 }
 
 func (s *Server) handleSubscribe(ses *session) error {
@@ -487,8 +651,14 @@ func (s *Server) handleSubscribe(ses *session) error {
 		topicL := uint32(binary.BigEndian.Uint16(p[i:]))
 		i += 2
 		topicEnd := i + topicL
-		if p[topicEnd]&0xFC != 0 { // [MQTT-3-8.3-4]
-			return errors.New("malformed SUBSCRIBE: Reserved bits in payload must be 0")
+
+		if ses.protoVersion == 5 {
+			if p[topicEnd]&0xC0 != 0 { // v5[MQTT-3.8.3-5]
+				return errors.New("malformed SUBSCRIBE: reserved bits in payload must be 0")
+			}
+			// TODO: store and use No Local, Retain As Published & Retain Handling options
+		} else if p[topicEnd]&0xFC != 0 { // [MQTT-3-8.3-4]
+			return errors.New("malformed SUBSCRIBE: reserved bits in payload must be 0")
 		}
 
 		topic := p[i:topicEnd]
@@ -500,6 +670,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 			log.WithFields(log.Fields{
 				"ClientId":     ses.clientId,
 				"Topic Filter": string(topic),
+				"QoS":          p[topicEnd],
 			}).Debug("SUBSCRIBE received")
 		}
 
@@ -510,14 +681,11 @@ func (s *Server) handleSubscribe(ses *session) error {
 	s.addSubscriptions(ses.client, topics, qoss)
 
 	// [MQTT-3.8.4-1, 4-4, 4-5, 4-6]
-	tl := len(topics)
-	subackP := make([]byte, 1, tl+7)
-	subackP[0] = model.SUBACK
-	subackP = model.VariableLengthEncode(subackP, tl+2)
-	subackP = append(subackP, ses.packet.vh[0], ses.packet.vh[1]) // [MQTT-3.8.4-2]
-	subackP = append(subackP, qoss...)                            // [MQTT-3.9.3-1]
+	return ses.sendSuback(qoss)
+}
 
-	return ses.writePacket(subackP)
+func (s *Server) handleSubscribeProperties(ses *session) error {
+	return nil // TODO: store and use Subscribe Properties
 }
 
 func (s *Server) handleUnsubscribe(ses *session) error {
@@ -549,8 +717,11 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 	s.removeSubscriptions(c, topics)
 
 	// [MQTT-3.10.4-4, 4-5, 4-6]
-	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.UNSUBACK, 2, ses.packet.vh[0], ses.packet.vh[1]
-	return ses.writePacket(c.acks)
+	return ses.sendUnsuback(len(topics))
+}
+
+func (s *Server) handleUnSubscribeProperties(ses *session) error {
+	return nil // TODO: store and use Unsubscribe Properties
 }
 
 var errInvalidUTF = errors.New("invalid UTF8")

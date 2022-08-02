@@ -461,7 +461,7 @@ func (c *fakeClient) sendPubrec(pID uint16) error {
 }
 
 func (c *fakeClient) sendPubrel(pID uint16) error {
-	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBREL|2, 2, uint8(pID>>8), uint8(pID)
+	c.acks[0], c.acks[1], c.acks[2], c.acks[3] = model.PUBRELSend, 2, uint8(pID>>8), uint8(pID)
 	return c.writePacket(c.acks)
 }
 

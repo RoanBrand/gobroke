@@ -14,7 +14,6 @@ type client struct {
 	session       *session
 	subscriptions topT
 	pIDs          chan uint16 // [MQTT-2.3.1-4]
-	acks          []byte
 
 	tx      *bufio.Writer
 	txFlush chan struct{}
@@ -33,7 +32,6 @@ func newClient(ses *session) *client {
 		session:       ses,
 		subscriptions: make(topT),
 		pIDs:          make(chan uint16, 65535),
-		acks:          make([]byte, 4),
 		tx:            bufio.NewWriter(ses.conn),
 		txFlush:       make(chan struct{}, 1),
 		q2RxLookup:    make(map[uint16]struct{}, 2),

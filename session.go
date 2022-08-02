@@ -27,6 +27,7 @@ type session struct {
 	stopped  sync.WaitGroup
 
 	clientId     string
+	assignedCId  bool
 	connectSent  bool
 	connectFlags byte
 	keepAlive    time.Duration
@@ -44,19 +45,18 @@ type packet struct {
 	lenMul          uint32
 
 	// Variable header
-	vhLen uint32
-	vh    []byte
-	pID   uint16 // subscribe, unsubscribe, publish with QoS>0.
+	vhToRead      uint32
+	vhPropertyLen uint32
+	vhBuf         []byte
+	pID           uint16 // subscribe, unsubscribe, publish with QoS>0.
 
-	payload []byte
+	payload []byte // sometimes used as temp buf for tx from reader thread
 }
 
-func (s *session) run(retryInterval uint64) {
-	s.stopped.Add(1)
-	go s.startWriter()
+func (s *session) run() {
 	c := s.client
 
-	if err := c.q2Stage2.ResendAll(s.sendPubRel); err != nil {
+	if err := c.q2Stage2.ResendAll(s.sendPubrelFromQueue); err != nil {
 		log.WithFields(log.Fields{
 			"ClientId": s.clientId,
 			"err":      err,
@@ -80,9 +80,14 @@ func (s *session) run(retryInterval uint64) {
 	go c.q1.StartDispatcher(s.ctx, s.sendPublish, s.getPId, &s.stopped)
 	go c.q2.StartDispatcher(s.ctx, s.sendPublish, s.getPId, &s.stopped)
 
-	if retryInterval > 0 {
+	// QoS 1&2 unacknowledged message resend timeout in ms
+	// Set to 0 to disable. Will always resend once on new conn.
+	// TODO: move to config
+	var retryInterval uint64 = 50000
+
+	if s.protoVersion != 5 && retryInterval > 0 {
 		s.stopped.Add(3)
-		go c.q2Stage2.MonitorTimeouts(s.ctx, retryInterval, s.sendPubRel, &s.stopped)
+		go c.q2Stage2.MonitorTimeouts(s.ctx, retryInterval, s.sendPubrelFromQueue, &s.stopped)
 		go c.q1.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.stopped)
 		go c.q2.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.stopped)
 	}
@@ -102,6 +107,18 @@ func (s *session) stop() {
 	})
 }
 
+func (s *session) handlePubrec() error {
+	pId := binary.BigEndian.Uint16(s.packet.vhBuf)
+	dupV3 := !s.client.qos2Part1Done(pId) && s.protoVersion == 3 && s.client.q2Stage2.Present(pId)
+	return s.sendPubrel(pId, dupV3)
+}
+
+func (s *session) handlePubrel() error {
+	pId := binary.BigEndian.Uint16(s.packet.vhBuf)
+	delete(s.client.q2RxLookup, pId)
+	return s.sendPubcomp()
+}
+
 func (s *session) getPId() uint16 {
 	return <-s.client.pIDs
 }
@@ -110,6 +127,75 @@ func (s *session) updateTimeout() {
 	if s.keepAlive > 0 {
 		s.conn.SetReadDeadline(time.Now().Add(s.keepAlive))
 	}
+}
+
+var connackProps = []byte{
+	41, 0, // Sub Ids not supported yet
+	42, 0, // Shared subs not supported yet
+}
+
+// Send CONNACK with success 0.
+func (s *session) sendConnackSuccess(sessionPresent bool) error {
+	p := s.packet.payload[:0]
+	p = append(p, model.CONNACK)
+
+	if s.protoVersion < 5 {
+		p = append(p, 2)
+		if sessionPresent {
+			p = append(p, 1)
+		} else {
+			p = append(p, 0)
+		}
+		p = append(p, 0) // success
+		return s.writePacket(p)
+	}
+
+	propsLen := len(connackProps)
+	if s.assignedCId {
+		propsLen += 3 + len(s.clientId)
+	}
+
+	rl := 2 + model.LengthToNumberOfVariableLengthBytes(propsLen) + propsLen
+
+	p = model.VariableLengthEncode(p, rl)
+
+	// Ack Flags
+	if sessionPresent {
+		p = append(p, 1)
+	} else {
+		p = append(p, 0)
+	}
+
+	// Reason Code
+	p = append(p, 0) // success
+
+	p = model.VariableLengthEncode(p, propsLen)
+	p = append(p, connackProps...)
+
+	if s.assignedCId {
+		cIdLen := uint16(len(s.clientId))
+		p = append(p, 18, byte(cIdLen>>8), byte(cIdLen))
+		p = append(p, []byte(s.clientId)...)
+	}
+
+	return s.writePacket(p)
+}
+
+// direct write to conn as writer not started yet
+func (s *session) sendConnackFail(reasonCode uint8) error {
+	// use packet.vhBuf as buffer, as won't be used anymore
+	p := s.packet.vhBuf
+	p[0], p[2], p[3] = model.CONNACK, 0, reasonCode
+
+	if s.protoVersion < 5 {
+		p[1] = 2
+		_, err := s.conn.Write(p[:4])
+		return err
+	}
+
+	p[1], p[4] = 3, 0
+	_, err := s.conn.Write(p[:5])
+	return err
 }
 
 func (s *session) sendPublish(i *queue.Item) error {
@@ -131,46 +217,36 @@ func (s *session) sendPublish(i *queue.Item) error {
 		i.Sent = time.Now()
 	}
 
+	if s.protoVersion == 5 {
+		rl++
+	}
+
 	s.client.txLock.Lock()
 
-	if err := s.client.tx.WriteByte(publish); err != nil {
-		s.client.txLock.Unlock()
-		return err
-	}
+	s.client.tx.WriteByte(publish)
 
-	if err := model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
+	model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
 		return s.client.tx.WriteByte(eb)
-	}); err != nil {
-		s.client.txLock.Unlock()
-		return err
+	})
+
+	tLen := binary.BigEndian.Uint16(i.P.Pub[1:])
+	// Topic Name
+	s.client.tx.Write(i.P.Pub[1 : 3+tLen])
+
+	// PId
+	if qos > 0 {
+		s.client.tx.WriteByte(byte(i.PId >> 8))
+		s.client.tx.WriteByte(byte(i.PId))
 	}
 
-	if qos == 0 {
-		if _, err := s.client.tx.Write(i.P.Pub[1:]); err != nil {
-			s.client.txLock.Unlock()
-			return err
-		}
-	} else {
-		tLen := binary.BigEndian.Uint16(i.P.Pub[1:])
-		if _, err := s.client.tx.Write(i.P.Pub[1 : 3+tLen]); err != nil {
-			s.client.txLock.Unlock()
-			return err
-		}
-
-		if err := s.client.tx.WriteByte(byte(i.PId >> 8)); err != nil {
-			s.client.txLock.Unlock()
-			return err
-		}
-		if err := s.client.tx.WriteByte(byte(i.PId)); err != nil {
-			s.client.txLock.Unlock()
-			return err
-		}
-
-		if _, err := s.client.tx.Write(i.P.Pub[3+tLen:]); err != nil {
-			s.client.txLock.Unlock()
-			return err
-		}
+	// Properties
+	if s.protoVersion == 5 {
+		// TODO: support outgoing properties
+		s.client.tx.WriteByte(0)
 	}
+
+	// Payload
+	_, err := s.client.tx.Write(i.P.Pub[3+tLen:])
 
 	s.client.txLock.Unlock()
 	s.client.notifyFlusher()
@@ -179,50 +255,117 @@ func (s *session) sendPublish(i *queue.Item) error {
 		i.P.FreeIfLastUser()
 	}
 
-	return nil
+	return err
 }
 
-func (s *session) sendPubRel(i *queue.Item) error {
-	var pubrel byte = model.PUBREL | 0x02
+func (s *session) sendPuback(pId uint16) error {
+	// TODO: support Reason Code, Properties
+	p := s.packet.payload[:0]
+	p = append(p, model.PUBACK, 2, byte(pId>>8), byte(pId))
+	return s.writePacket(p)
+}
+
+func (s *session) sendPubrec(pId uint16) error {
+	// TODO: support Reason Code, Properties
+	p := s.packet.payload[:0]
+	p = append(p, model.PUBREC, 2, byte(pId>>8), byte(pId))
+	return s.writePacket(p)
+}
+
+func (s *session) sendPubrel(pId uint16, dupV3 bool) error {
+	// TODO: support Reason Code, Properties
+	p := s.packet.payload[:0]
+	p = append(p, model.PUBRELSend, 2, byte(pId>>8), byte(pId))
+	return s.writePacket(p)
+}
+
+//
+func (s *session) sendPubrelFromQueue(i *queue.Item) error {
+	var header byte = model.PUBRELSend
 	if s.protoVersion == 3 && !i.Sent.IsZero() {
-		pubrel |= 0x08 // set DUP if sent before
+		header |= 0x08 // set mqtt3 DUP
 	}
 
-	i.Sent = time.Now()
 	s.client.txLock.Lock()
 
-	// Header
-	if err := s.client.tx.WriteByte(pubrel); err != nil {
-		s.client.txLock.Unlock()
-		return err
+	s.client.tx.WriteByte(header)
+	s.client.tx.WriteByte(2)
+	s.client.tx.WriteByte(byte(i.PId >> 8))
+	err := s.client.tx.WriteByte(byte(i.PId))
+
+	s.client.txLock.Unlock()
+	s.client.notifyFlusher()
+
+	i.Sent = time.Now()
+	return err
+}
+
+func (s *session) sendPubcomp() error {
+	// TODO: support Reason Code, Properties
+	p := s.packet.payload[:0]
+	p = append(p, model.PUBCOMP, 2, s.packet.vhBuf[0], s.packet.vhBuf[1])
+	return s.writePacket(p)
+}
+
+func (s *session) sendSuback(reasonCodes []uint8) error {
+	rl := len(reasonCodes) + 2
+	if s.protoVersion == 5 {
+		rl++
 	}
-	// Length
-	if err := s.client.tx.WriteByte(2); err != nil {
-		s.client.txLock.Unlock()
-		return err
+
+	s.client.txLock.Lock()
+
+	s.client.tx.WriteByte(model.SUBACK)
+
+	model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
+		return s.client.tx.WriteByte(eb)
+	})
+
+	// Variable Header
+	s.client.tx.WriteByte(s.packet.vhBuf[0]) // [MQTT-3.8.4-2]
+	s.client.tx.WriteByte(s.packet.vhBuf[1])
+
+	if s.protoVersion == 5 {
+		s.client.tx.WriteByte(0) // TODO: support properties
 	}
-	// pID
-	if err := s.client.tx.WriteByte(byte(i.PId >> 8)); err != nil {
-		s.client.txLock.Unlock()
-		return err
+
+	// Payload
+	_, err := s.client.tx.Write(reasonCodes) // [MQTT-3.9.3-1]
+
+	s.client.txLock.Unlock()
+	s.client.notifyFlusher()
+	return err
+}
+
+func (s *session) sendUnsuback(nTopics int) error {
+	rl := 2
+	if s.protoVersion == 5 {
+		rl += nTopics + 1
 	}
-	if err := s.client.tx.WriteByte(byte(i.PId)); err != nil {
-		s.client.txLock.Unlock()
-		return err
+
+	s.client.txLock.Lock()
+
+	s.client.tx.WriteByte(model.UNSUBACK)
+
+	model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
+		return s.client.tx.WriteByte(eb)
+	})
+
+	// Variable Header
+	s.client.tx.WriteByte(s.packet.vhBuf[0])
+	err := s.client.tx.WriteByte(s.packet.vhBuf[1])
+
+	if s.protoVersion == 5 {
+		s.client.tx.WriteByte(0) // TODO: support properties
+
+		// Payload
+		for i := 0; i < nTopics; i++ {
+			err = s.client.tx.WriteByte(0) // TODO: support reason codes
+		}
 	}
 
 	s.client.txLock.Unlock()
 	s.client.notifyFlusher()
-	return nil
-}
-
-// Send CONNACK with optional Session Present flag.
-func (s *session) sendConnack(errCode uint8, SP bool) error {
-	p := []byte{model.CONNACK, 2, 0, errCode}
-	if SP {
-		p[2] = 1
-	}
-	_, err := s.conn.Write(p)
 	return err
 }
 
@@ -246,7 +389,7 @@ func (s *Server) startSession(conn net.Conn) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	conn.SetReadDeadline(time.Now().Add(time.Second * 10)) // CONNECT packet timeout
 	ns := session{ctx: ctx, cancel: cancel, conn: conn}
-	ns.packet.vh, ns.packet.payload = make([]byte, 0, 512), make([]byte, 0, 512)
+	ns.packet.vhBuf, ns.packet.payload = make([]byte, 0, 512), make([]byte, 0, 512)
 
 	ns.stopped.Add(1)
 	graceFullExit := false
@@ -266,30 +409,43 @@ func (s *Server) startSession(conn net.Conn) {
 	}()
 
 	rx := make([]byte, 1024)
+
 	for {
 		nRx, err := conn.Read(rx)
 		if err != nil {
-			if err.Error() == "EOF" || errors.Is(err, net.ErrClosed) {
-				return
-			}
+			ns.readError(err)
+			return
+		}
 
-			// KeepAlive timeout
-			if strings.Contains(err.Error(), "i/o timeout") {
-				l := log.WithFields(log.Fields{
+		if nRx == 0 {
+			continue
+		}
+
+		// [MQTT-3.1.0-1]
+		if rx[0]&0xF0 != model.CONNECT {
+			log.Debug("first packet from new connection is not CONNECT")
+			return
+		}
+
+		if err = s.parseStream(&ns, rx[:nRx]); err != nil {
+			if err == errCleanExit {
+				graceFullExit = true
+			} else {
+				log.WithFields(log.Fields{
 					"ClientId": ns.clientId,
-				})
-				if ns.connectSent {
-					l.Debug("KeepAlive timeout. Dropping connection")
-				} else {
-					l.Debug("Timeout waiting for CONNECT. Dropping connection")
-				}
-				return
+					"err":      err,
+				}).Debug("client failure")
 			}
+			return
+		}
 
-			log.WithFields(log.Fields{
-				"ClientId": ns.clientId,
-				"err":      err,
-			}).Error("TCP RX error")
+		break
+	}
+
+	for {
+		nRx, err := conn.Read(rx)
+		if err != nil {
+			ns.readError(err)
 			return
 		}
 
@@ -305,6 +461,30 @@ func (s *Server) startSession(conn net.Conn) {
 			return
 		}
 	}
+}
+
+func (s *session) readError(err error) {
+	if err.Error() == "EOF" || errors.Is(err, net.ErrClosed) {
+		return
+	}
+
+	// KeepAlive timeout
+	if strings.Contains(err.Error(), "i/o timeout") {
+		l := log.WithFields(log.Fields{
+			"ClientId": s.clientId,
+		})
+		if s.connectSent {
+			l.Debug("KeepAlive timeout. Dropping connection")
+		} else {
+			l.Debug("Timeout waiting for CONNECT. Dropping connection")
+		}
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"ClientId": s.clientId,
+		"err":      err,
+	}).Error("TCP RX error")
 }
 
 func (s *session) startWriter() {

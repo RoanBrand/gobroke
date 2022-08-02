@@ -134,7 +134,7 @@ func testConnect(t *testing.T) {
 	}
 
 	l := byte(len(c.ClientID))
-	connectPack := []byte{1 << 4, 12 + l, 0, 4, 'M', 'Q', 'T', 'T', 5, 0, 0, 0, 0, l}
+	connectPack := []byte{1 << 4, 12 + l, 0, 4, 'M', 'Q', 'T', 'T', 2, 0, 0, 0, 0, l}
 	connectPack = append(connectPack, []byte(c.ClientID)...)
 	if err := c.writePacket(connectPack); err != nil {
 		t.Fatal(err)
@@ -149,7 +149,7 @@ func testConnect(t *testing.T) {
 		t.Fatal("no connack received:", protoErr)
 	case connack := <-c.connacks:
 		if connack.code != 1 {
-			t.Fatal(protoErr)
+			t.Fatal(protoErr, connack.code)
 		}
 		if connack.sp != 0 {
 			t.Fatal("unexpected session present")

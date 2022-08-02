@@ -16,6 +16,8 @@ const (
 	PINGREQ     = 12 << 4
 	PINGRESP    = 13 << 4
 	DISCONNECT  = 14 << 4
+
+	PUBRELSend = PUBREL | 2
 )
 
 func VariableLengthEncode(packet []byte, l int) []byte {
@@ -46,5 +48,18 @@ func VariableLengthEncodeNoAlloc(l int, f func(eb byte) error) error {
 		if l <= 0 {
 			return nil
 		}
+	}
+}
+
+func LengthToNumberOfVariableLengthBytes(l int) int {
+	switch {
+	case l < 128:
+		return 1
+	case l < 16384:
+		return 2
+	case l < 2097152:
+		return 3
+	default:
+		return 4
 	}
 }

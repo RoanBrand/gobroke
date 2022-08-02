@@ -27,7 +27,7 @@ func (q *Basic) Add(i *Item) {
 	if q.h == nil {
 		q.h = i
 	} else {
-		q.t.next = i
+		q.t.next = i // add singly
 	}
 	q.t = i
 	q.Unlock()
@@ -60,12 +60,10 @@ func (q *Basic) StartDispatcher(ctx context.Context, d func(*Item) error, wg *sy
 
 		i := q.h
 		if i != nil {
-			q.h = i.next
+			q.h = i.next // remove singly
 			if q.h == nil {
 				q.t = nil
-			} /* else {
-				q.h.prev = nil
-			}*/
+			}
 		}
 
 		q.Unlock()
@@ -83,7 +81,7 @@ func (q *Basic) StartDispatcher(ctx context.Context, d func(*Item) error, wg *sy
 func (q *queue) Reset() {
 	q.Lock()
 	for i := q.h; i != nil; i = i.next {
-		q.remove(i)
+		q.removeDoubly(i)
 		i.P.FreeIfLastUser()
 		ReturnItem(i)
 	}
@@ -91,7 +89,7 @@ func (q *queue) Reset() {
 	q.Unlock()
 }
 
-func (q *queue) add(i *Item) {
+func (q *queue) addDoubly(i *Item) {
 	if q.h == nil {
 		q.h = i
 	} else {
@@ -101,7 +99,7 @@ func (q *queue) add(i *Item) {
 	q.t = i
 }
 
-func (q *queue) remove(i *Item) {
+func (q *queue) removeDoubly(i *Item) {
 	if i == q.h {
 		q.h = i.next
 	} else {
