@@ -23,16 +23,8 @@ const (
 	variableHeaderLen
 	variableHeader
 
-	// mqtt5
 	propertiesLen
-	propertiesCONNECT
-	propertiesPUBLISH
-	propertiesPUBACK
-	propertiesPUBREC
-	propertiesPUBREL
-	propertiesPUBCOMP
-	propertiesSUBSCRIBE
-	propertiesUNSUBSCRIBE
+	properties
 
 	payload
 )
@@ -379,33 +371,13 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						ses.rxState = payload
 					}
 				} else {
-					switch p.controlType {
-					case model.PUBLISH:
-						ses.rxState = propertiesPUBLISH
-					case model.PUBACK:
-						ses.rxState = propertiesPUBACK
-					case model.PUBREC:
-						ses.rxState = propertiesPUBREC
-					case model.PUBREL:
-						ses.rxState = propertiesPUBREL
-					case model.PUBCOMP:
-						ses.rxState = propertiesPUBCOMP
-					case model.SUBSCRIBE:
-						p.vhBuf = p.vhBuf[:0]
-						ses.rxState = propertiesSUBSCRIBE
-					case model.UNSUBSCRIBE:
-						p.vhBuf = p.vhBuf[:0]
-						ses.rxState = propertiesUNSUBSCRIBE
-					case model.CONNECT:
-						p.vhBuf = p.vhBuf[:0]
-						ses.rxState = propertiesCONNECT
-					}
+					ses.rxState = properties
 				}
 			}
 
 			p.remainingLength--
 			i++
-		case propertiesPUBLISH:
+		case properties:
 			toRead := p.vhPropertyLen
 			if avail := l - i; avail < toRead {
 				toRead = avail
@@ -416,136 +388,48 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			p.vhPropertyLen -= toRead
 
 			if p.vhPropertyLen == 0 {
-				if err := s.handlePublishProperties(ses); err != nil {
-					return err
+				switch p.controlType {
+				case model.PUBLISH:
+					if err := s.handlePublishProperties(ses); err != nil {
+						return err
+					}
+					ses.rxState = payload
+				case model.PUBACK:
+					// TODO: handle PUBACK props
+					ses.client.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
+					ses.rxState = controlAndFlags
+				case model.PUBREC:
+					// TODO: handle PUBREC props
+					if err := ses.handlePubrec(); err != nil {
+						return err
+					}
+					ses.rxState = controlAndFlags
+				case model.PUBREL:
+					// TODO: handle PUBREL props
+					if err := ses.handlePubrel(); err != nil {
+						return err
+					}
+					ses.rxState = controlAndFlags
+				case model.PUBCOMP:
+					// TODO: handle PUBCOMP props
+					ses.client.qos2Part2Done(binary.BigEndian.Uint16(p.vhBuf))
+					ses.rxState = controlAndFlags
+				case model.SUBSCRIBE:
+					if err := s.handleSubscribeProperties(ses); err != nil {
+						return err
+					}
+					ses.rxState = payload
+				case model.UNSUBSCRIBE:
+					if err := s.handleUnSubscribeProperties(ses); err != nil {
+						return err
+					}
+					ses.rxState = payload
+				case model.CONNECT:
+					if err := s.handleConnectProperties(ses); err != nil {
+						return err
+					}
+					ses.rxState = payload
 				}
-				ses.rxState = payload
-			}
-
-			i += toRead
-		case propertiesPUBACK:
-			toRead := p.vhPropertyLen
-			if avail := l - i; avail < toRead {
-				toRead = avail
-			}
-
-			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
-			p.remainingLength -= toRead
-			p.vhPropertyLen -= toRead
-
-			if p.vhPropertyLen == 0 {
-				// TODO: handle PUBACK props
-				ses.client.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
-				ses.rxState = controlAndFlags
-			}
-
-			i += toRead
-		case propertiesPUBREC:
-			toRead := p.vhPropertyLen
-			if avail := l - i; avail < toRead {
-				toRead = avail
-			}
-
-			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
-			p.remainingLength -= toRead
-			p.vhPropertyLen -= toRead
-
-			if p.vhPropertyLen == 0 {
-				// TODO: handle PUBREC props
-				if err := ses.handlePubrec(); err != nil {
-					return err
-				}
-				ses.rxState = controlAndFlags
-			}
-
-			i += toRead
-		case propertiesPUBREL:
-			toRead := p.vhPropertyLen
-			if avail := l - i; avail < toRead {
-				toRead = avail
-			}
-
-			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
-			p.remainingLength -= toRead
-			p.vhPropertyLen -= toRead
-
-			if p.vhPropertyLen == 0 {
-				// TODO: handle PUBREL props
-				if err := ses.handlePubrel(); err != nil {
-					return err
-				}
-				ses.rxState = controlAndFlags
-			}
-
-			i += toRead
-		case propertiesPUBCOMP:
-			toRead := p.vhPropertyLen
-			if avail := l - i; avail < toRead {
-				toRead = avail
-			}
-
-			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
-			p.remainingLength -= toRead
-			p.vhPropertyLen -= toRead
-
-			if p.vhPropertyLen == 0 {
-				// TODO: handle PUBCOMP props
-				ses.client.qos2Part2Done(binary.BigEndian.Uint16(p.vhBuf))
-				ses.rxState = controlAndFlags
-			}
-
-			i += toRead
-		case propertiesSUBSCRIBE:
-			toRead := p.vhPropertyLen
-			if avail := l - i; avail < toRead {
-				toRead = avail
-			}
-
-			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
-			p.remainingLength -= toRead
-			p.vhPropertyLen -= toRead
-
-			if p.vhPropertyLen == 0 {
-				if err := s.handleSubscribeProperties(ses); err != nil {
-					return err
-				}
-				ses.rxState = payload
-			}
-
-			i += toRead
-		case propertiesUNSUBSCRIBE:
-			toRead := p.vhPropertyLen
-			if avail := l - i; avail < toRead {
-				toRead = avail
-			}
-
-			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
-			p.remainingLength -= toRead
-			p.vhPropertyLen -= toRead
-
-			if p.vhPropertyLen == 0 {
-				if err := s.handleUnSubscribeProperties(ses); err != nil {
-					return err
-				}
-				ses.rxState = payload
-			}
-
-			i += toRead
-		case propertiesCONNECT:
-			toRead := p.vhPropertyLen
-			if avail := l - i; avail < toRead {
-				toRead = avail
-			}
-
-			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
-			p.remainingLength -= toRead
-			p.vhPropertyLen -= toRead
-
-			if p.vhPropertyLen == 0 {
-				if err := s.handleConnectProperties(ses); err != nil {
-					return err
-				}
-				ses.rxState = payload
 			}
 
 			i += toRead
