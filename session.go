@@ -50,7 +50,7 @@ type packet struct {
 	vhBuf         []byte
 	pID           uint16 // subscribe, unsubscribe, publish with QoS>0.
 
-	payload []byte
+	payload []byte // sometimes used as temp buf for tx from reader thread
 }
 
 func (s *session) run() {
@@ -136,21 +136,18 @@ var connackProps = []byte{
 
 // Send CONNACK with success 0.
 func (s *session) sendConnackSuccess(sessionPresent bool) error {
+	p := s.packet.payload[:0]
+	p = append(p, model.CONNACK)
+
 	if s.protoVersion < 5 {
-		s.client.txLock.Lock()
-
-		s.client.tx.WriteByte(model.CONNACK)
-		s.client.tx.WriteByte(2)
+		p = append(p, 2)
 		if sessionPresent {
-			s.client.tx.WriteByte(1)
+			p = append(p, 1)
 		} else {
-			s.client.tx.WriteByte(0)
+			p = append(p, 0)
 		}
-		err := s.client.tx.WriteByte(0) // success
-
-		s.client.txLock.Unlock()
-		s.client.notifyFlusher()
-		return err
+		p = append(p, 0) // success
+		return s.writePacket(p)
 	}
 
 	propsLen := len(connackProps)
@@ -160,39 +157,28 @@ func (s *session) sendConnackSuccess(sessionPresent bool) error {
 
 	rl := 2 + model.LengthToNumberOfVariableLengthBytes(propsLen) + propsLen
 
-	s.client.txLock.Lock()
+	p = model.VariableLengthEncode(p, rl)
 
-	s.client.tx.WriteByte(model.CONNACK)
-
-	model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
-		return s.client.tx.WriteByte(eb)
-	})
-
+	// Ack Flags
 	if sessionPresent {
-		s.client.tx.WriteByte(1)
+		p = append(p, 1)
 	} else {
-		s.client.tx.WriteByte(0)
+		p = append(p, 0)
 	}
 
-	s.client.tx.WriteByte(0) // success
+	// Reason Code
+	p = append(p, 0) // success
 
-	model.VariableLengthEncodeNoAlloc(propsLen, func(eb byte) error {
-		return s.client.tx.WriteByte(eb)
-	})
-
-	_, err := s.client.tx.Write(connackProps)
+	p = model.VariableLengthEncode(p, propsLen)
+	p = append(p, connackProps...)
 
 	if s.assignedCId {
-		s.client.tx.WriteByte(18)
 		cIdLen := uint16(len(s.clientId))
-		s.client.tx.WriteByte(byte(cIdLen >> 8))
-		s.client.tx.WriteByte(byte(cIdLen))
-		_, err = s.client.tx.WriteString(s.clientId)
+		p = append(p, 18, byte(cIdLen>>8), byte(cIdLen))
+		p = append(p, []byte(s.clientId)...)
 	}
 
-	s.client.txLock.Unlock()
-	s.client.notifyFlusher()
-	return err
+	return s.writePacket(p)
 }
 
 // direct write to conn as writer not started yet
