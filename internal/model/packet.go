@@ -16,6 +16,8 @@ const (
 	PINGREQ     = 12 << 4
 	PINGRESP    = 13 << 4
 	DISCONNECT  = 14 << 4
+
+	PUBRELSend = PUBREL | 2
 )
 
 func VariableLengthEncode(packet []byte, l int) []byte {

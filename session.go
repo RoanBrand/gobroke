@@ -56,7 +56,7 @@ type packet struct {
 func (s *session) run() {
 	c := s.client
 
-	if err := c.q2Stage2.ResendAll(s.sendPubrelQ); err != nil {
+	if err := c.q2Stage2.ResendAll(s.sendPubrelFromQueue); err != nil {
 		log.WithFields(log.Fields{
 			"ClientId": s.clientId,
 			"err":      err,
@@ -87,7 +87,7 @@ func (s *session) run() {
 
 	if s.protoVersion != 5 && retryInterval > 0 {
 		s.stopped.Add(3)
-		go c.q2Stage2.MonitorTimeouts(s.ctx, retryInterval, s.sendPubrelQ, &s.stopped)
+		go c.q2Stage2.MonitorTimeouts(s.ctx, retryInterval, s.sendPubrelFromQueue, &s.stopped)
 		go c.q1.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.stopped)
 		go c.q2.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.stopped)
 	}
@@ -116,7 +116,7 @@ func (s *session) handlePubrec() error {
 func (s *session) handlePubrel() error {
 	pId := binary.BigEndian.Uint16(s.packet.vhBuf)
 	delete(s.client.q2RxLookup, pId)
-	return s.sendPubcomp(pId)
+	return s.sendPubcomp()
 }
 
 func (s *session) getPId() uint16 {
@@ -273,105 +273,52 @@ func (s *session) sendPublish(i *queue.Item) error {
 }
 
 func (s *session) sendPuback(pId uint16) error {
-	var rl uint8 = 2
-	/*if s.protoVersion == 5 {
-		rl += 2
-	}*/
-
-	s.client.txLock.Lock()
-
-	s.client.tx.WriteByte(model.PUBACK)
-	s.client.tx.WriteByte(rl)
-	s.client.tx.WriteByte(byte(pId >> 8))
-	err := s.client.tx.WriteByte(byte(pId))
-
-	/*if s.protoVersion == 5 {
-		s.client.tx.WriteByte(0)       // Reason Code
-		err = s.client.tx.WriteByte(0) // Property Length
-	}*/
-
-	s.client.txLock.Unlock()
-	s.client.notifyFlusher()
-	return err
+	// TODO: support Reason Code, Properties
+	p := s.packet.payload[:0]
+	p = append(p, model.PUBACK, 2, byte(pId>>8), byte(pId))
+	return s.writePacket(p)
 }
 
 func (s *session) sendPubrec(pId uint16) error {
-	var rl uint8 = 2
-	/*if s.protoVersion == 5 {
-		rl += 2
-	}*/
-
-	s.client.txLock.Lock()
-
-	s.client.tx.WriteByte(model.PUBREC)
-	s.client.tx.WriteByte(rl)
-	s.client.tx.WriteByte(byte(pId >> 8))
-	err := s.client.tx.WriteByte(byte(pId))
-
-	/*if s.protoVersion == 5 {
-		s.client.tx.WriteByte(0)       // Reason Code
-		err = s.client.tx.WriteByte(0) // Property Length
-	}*/
-
-	s.client.txLock.Unlock()
-	s.client.notifyFlusher()
-	return err
+	// TODO: support Reason Code, Properties
+	p := s.packet.payload[:0]
+	p = append(p, model.PUBREC, 2, byte(pId>>8), byte(pId))
+	return s.writePacket(p)
 }
 
 func (s *session) sendPubrel(pId uint16, dupV3 bool) error {
-	var header byte = model.PUBREL | 0x02
-	var rl uint8 = 2
-	/*if s.protoVersion == 5 {
-		rl += 2
-	} else */
-	if dupV3 {
+	// TODO: support Reason Code, Properties
+	p := s.packet.payload[:0]
+	p = append(p, model.PUBRELSend, 2, byte(pId>>8), byte(pId))
+	return s.writePacket(p)
+}
+
+//
+func (s *session) sendPubrelFromQueue(i *queue.Item) error {
+	var header byte = model.PUBRELSend
+	if s.protoVersion == 3 && !i.Sent.IsZero() {
 		header |= 0x08 // set mqtt3 DUP
 	}
 
 	s.client.txLock.Lock()
 
 	s.client.tx.WriteByte(header)
-	s.client.tx.WriteByte(rl)
-	s.client.tx.WriteByte(byte(pId >> 8))
-	err := s.client.tx.WriteByte(byte(pId))
-
-	/*if s.protoVersion == 5 {
-		s.client.tx.WriteByte(0)       // Reason Code
-		err = s.client.tx.WriteByte(0) // Property Length
-	}*/
+	s.client.tx.WriteByte(2)
+	s.client.tx.WriteByte(byte(i.PId >> 8))
+	err := s.client.tx.WriteByte(byte(i.PId))
 
 	s.client.txLock.Unlock()
 	s.client.notifyFlusher()
-	return err
-}
 
-func (s *session) sendPubrelQ(i *queue.Item) error {
-	err := s.sendPubrel(i.PId, s.protoVersion == 3 && !i.Sent.IsZero())
 	i.Sent = time.Now()
 	return err
 }
 
-func (s *session) sendPubcomp(pId uint16) error {
-	var rl uint8 = 2
-	/*if s.protoVersion == 5 {
-		rl += 2
-	}*/
-
-	s.client.txLock.Lock()
-
-	s.client.tx.WriteByte(model.PUBCOMP)
-	s.client.tx.WriteByte(rl)
-	s.client.tx.WriteByte(byte(pId >> 8))
-	err := s.client.tx.WriteByte(byte(pId))
-
-	/*if s.protoVersion == 5 {
-		s.client.tx.WriteByte(0)       // Reason Code
-		err = s.client.tx.WriteByte(0) // Property Length
-	}*/
-
-	s.client.txLock.Unlock()
-	s.client.notifyFlusher()
-	return err
+func (s *session) sendPubcomp() error {
+	// TODO: support Reason Code, Properties
+	p := s.packet.payload[:0]
+	p = append(p, model.PUBCOMP, 2, s.packet.vhBuf[0], s.packet.vhBuf[1])
+	return s.writePacket(p)
 }
 
 func (s *session) sendSuback(reasonCodes []uint8) error {

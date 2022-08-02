@@ -44,6 +44,8 @@ const (
 	payload
 )
 
+const maxVarLenMul = 128 * 128 * 128
+
 var (
 	protoVersionToName = map[uint8][]byte{
 		3: {'M', 'Q', 'I', 's', 'd', 'p'},
@@ -68,14 +70,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 			switch p.controlType { // [MQTT-2.2.2-1, 2-2]
 			case model.PUBLISH:
-				rawQoS := p.flags & 0x06
-				if rawQoS == 0 {
-					if p.flags&0x08 > 0 { // [MQTT-3.3.1-2]
-						return errors.New("malformed PUBLISH: DUP set for QoS0")
-					}
-				} else if rawQoS == 6 { // [MQTT-3.3.1-4]
-					return errors.New("malformed PUBLISH: no QoS3 allowed")
-				}
+				break
 			case model.PUBACK, model.PUBREC, model.PUBCOMP, model.PINGREQ:
 				if p.flags != 0 {
 					return errors.New("malformed packet: fixed header flags must be 0 (reserved)")
@@ -126,72 +121,87 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			}
 
 			ses.rxState = length
-			p.remainingLength, p.lenMul = 0, 1
+			p.lenMul = 1
 			i++
 		case length:
 			p.remainingLength += uint32(rx[i]&127) * p.lenMul
-			if p.lenMul *= 128; p.lenMul > 128*128*128 {
+			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
 				return errors.New("malformed packet: bad remaining length")
 			}
 
 			if rx[i]&128 == 0 {
 				switch p.controlType {
 				case model.PUBLISH, model.CONNECT:
-					p.vhToRead = 0 // determined later
+					p.vhToRead = 2
+					p.vhBuf = p.vhBuf[:0]
+					ses.rxState = variableHeaderLen
 				case model.PUBACK, model.PUBREC, model.PUBREL, model.PUBCOMP:
 					p.vhToRead = 2
 					if ses.protoVersion == 5 && p.remainingLength > 2 {
 						p.vhToRead++ // Reason Code
 					}
+
+					p.vhBuf = p.vhBuf[:0]
+					ses.rxState = variableHeader
 				case model.SUBSCRIBE:
 					// [MQTT-3.8.3-3]
 					if p.remainingLength < 5 || (ses.protoVersion == 5 && p.remainingLength < 6) {
 						return errors.New("malformed SUBSCRIBE: no Topic Filter present")
 					}
+
 					p.vhToRead = 2
+					p.vhBuf = p.vhBuf[:0]
+					ses.rxState = variableHeader
 				case model.UNSUBSCRIBE:
 					if p.remainingLength < 4 || (ses.protoVersion == 5 && p.remainingLength < 5) { // [MQTT-3.10.3-2]
 						return errors.New("malformed UNSUBSCRIBE: no Topic Filter present")
 					}
+
 					p.vhToRead = 2
+					p.vhBuf = p.vhBuf[:0]
+					ses.rxState = variableHeader
 				case model.PINGREQ:
 					if err := ses.writePacket(pingRespPacket); err != nil {
 						return err
 					}
-				}
 
-				if p.remainingLength == 0 {
 					ses.updateTimeout()
 					ses.rxState = controlAndFlags
-				} else {
-					p.vhBuf = p.vhBuf[:0]
-					if p.controlType == model.PUBLISH || p.controlType == model.CONNECT {
-						ses.rxState = variableHeaderLen
-					} else {
-						ses.rxState = variableHeader
-					}
 				}
 			}
 
 			i++
 		case variableHeaderLen:
-			p.vhBuf = append(p.vhBuf, rx[i])
-			p.vhToRead++
-			p.remainingLength--
+			toRead := p.vhToRead
+			if avail := l - i; avail < toRead {
+				toRead = avail
+			}
 
-			if p.vhToRead == 2 {
+			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
+			p.vhToRead -= toRead
+			p.remainingLength -= toRead
+
+			if p.vhToRead == 0 {
 				p.vhToRead = uint32(binary.BigEndian.Uint16(p.vhBuf))
 				if p.controlType == model.PUBLISH {
-					if p.flags&0x06 > 0 { // Qos > 0
+					rawQoS := p.flags & 0x06
+					if rawQoS > 0 { // Qos > 0
+						if rawQoS == 6 { // [MQTT-3.3.1-4]
+							return errors.New("malformed PUBLISH: no QoS3 allowed")
+						}
+
 						p.vhToRead += 2
+					} else if p.flags&0x08 > 0 { // [MQTT-3.3.1-2]
+						return errors.New("malformed PUBLISH: DUP set for QoS0")
 					}
+
 				} else { // CONNECT
 					p.vhToRead += 4 // ProtoVersion + ConnectFlags + KeepAlive
 				}
 				ses.rxState = variableHeader
 			}
 
-			i++
+			i += toRead
 		case variableHeader:
 			toRead := p.vhToRead
 			if avail := l - i; avail < toRead {
@@ -219,7 +229,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					if p.remainingLength == 0 {
 						c.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
 					}
-					if ses.protoVersion == 5 && len(p.vhBuf) > 2 && p.vhBuf[2] != 0 {
+					if len(p.vhBuf) > 2 && ses.protoVersion == 5 && p.vhBuf[2] != 0 {
 						log.WithFields(log.Fields{
 							"ClientId":    ses.clientId,
 							"Reason Code": p.vhBuf[2],
@@ -231,7 +241,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 							return err
 						}
 					}
-					if ses.protoVersion == 5 && len(p.vhBuf) > 2 && p.vhBuf[2] != 0 {
+					if len(p.vhBuf) > 2 && ses.protoVersion == 5 && p.vhBuf[2] != 0 {
 						log.WithFields(log.Fields{
 							"ClientId":    ses.clientId,
 							"Reason Code": p.vhBuf[2],
@@ -243,7 +253,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 							return err
 						}
 					}
-					if ses.protoVersion == 5 && len(p.vhBuf) > 2 && p.vhBuf[2] != 0 {
+					if len(p.vhBuf) > 2 && ses.protoVersion == 5 && p.vhBuf[2] != 0 {
 						log.WithFields(log.Fields{
 							"ClientId":    ses.clientId,
 							"Reason Code": p.vhBuf[2],
@@ -253,7 +263,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					if p.remainingLength == 0 {
 						c.qos2Part2Done(binary.BigEndian.Uint16(p.vhBuf))
 					}
-					if ses.protoVersion == 5 && len(p.vhBuf) > 2 && p.vhBuf[2] != 0 {
+					if len(p.vhBuf) > 2 && ses.protoVersion == 5 && p.vhBuf[2] != 0 {
 						log.WithFields(log.Fields{
 							"ClientId":    ses.clientId,
 							"Reason Code": p.vhBuf[2],
@@ -306,30 +316,28 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						}
 					}
 					ses.rxState = controlAndFlags
-				} else {
-					if ses.protoVersion == 5 {
-						p.vhPropertyLen, p.lenMul = 0, 1
-						switch p.controlType {
-						case model.PUBLISH:
-							ses.rxState = propertiesLenPUBLISH
-						case model.PUBACK:
-							ses.rxState = propertiesLenPUBACK
-						case model.PUBREC:
-							ses.rxState = propertiesLenPUBREC
-						case model.PUBREL:
-							ses.rxState = propertiesLenPUBREL
-						case model.PUBCOMP:
-							ses.rxState = propertiesLenPUBCOMP
-						case model.SUBSCRIBE:
-							ses.rxState = propertiesLenSUBSCRIBE
-						case model.UNSUBSCRIBE:
-							ses.rxState = propertiesLenUNSUBSCRIBE
-						case model.CONNECT:
-							ses.rxState = propertiesLenCONNECT
-						}
-					} else {
-						ses.rxState = payload
+				} else if ses.protoVersion == 5 {
+					p.lenMul = 1
+					switch p.controlType {
+					case model.PUBLISH:
+						ses.rxState = propertiesLenPUBLISH
+					case model.PUBACK:
+						ses.rxState = propertiesLenPUBACK
+					case model.PUBREC:
+						ses.rxState = propertiesLenPUBREC
+					case model.PUBREL:
+						ses.rxState = propertiesLenPUBREL
+					case model.PUBCOMP:
+						ses.rxState = propertiesLenPUBCOMP
+					case model.SUBSCRIBE:
+						ses.rxState = propertiesLenSUBSCRIBE
+					case model.UNSUBSCRIBE:
+						ses.rxState = propertiesLenUNSUBSCRIBE
+					case model.CONNECT:
+						ses.rxState = propertiesLenCONNECT
 					}
+				} else {
+					ses.rxState = payload
 				}
 			}
 
@@ -366,7 +374,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			i += toRead
 		case propertiesLenPUBLISH:
 			p.vhPropertyLen += uint32(rx[i]&127) * p.lenMul
-			if p.lenMul *= 128; p.lenMul > 128*128*128 {
+			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
 				return errors.New("malformed PUBLISH: bad Properties Length")
 			}
 
@@ -400,7 +408,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			i += toRead
 		case propertiesLenPUBACK:
 			p.vhPropertyLen += uint32(rx[i]&127) * p.lenMul
-			if p.lenMul *= 128; p.lenMul > 128*128*128 {
+			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
 				return errors.New("malformed PUBACK: bad Properties Length")
 			}
 
@@ -434,7 +442,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			i += toRead
 		case propertiesLenPUBREC:
 			p.vhPropertyLen += uint32(rx[i]&127) * p.lenMul
-			if p.lenMul *= 128; p.lenMul > 128*128*128 {
+			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
 				return errors.New("malformed PUBREC: bad Properties Length")
 			}
 
@@ -472,7 +480,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			i += toRead
 		case propertiesLenPUBREL:
 			p.vhPropertyLen += uint32(rx[i]&127) * p.lenMul
-			if p.lenMul *= 128; p.lenMul > 128*128*128 {
+			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
 				return errors.New("malformed PUBREL: bad Properties Length")
 			}
 
@@ -510,7 +518,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			i += toRead
 		case propertiesLenPUBCOMP:
 			p.vhPropertyLen += uint32(rx[i]&127) * p.lenMul
-			if p.lenMul *= 128; p.lenMul > 128*128*128 {
+			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
 				return errors.New("malformed PUBCOMP: bad Properties Length")
 			}
 
@@ -544,7 +552,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			i += toRead
 		case propertiesLenSUBSCRIBE:
 			p.vhPropertyLen += uint32(rx[i]&127) * p.lenMul
-			if p.lenMul *= 128; p.lenMul > 128*128*128 {
+			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
 				return errors.New("malformed SUBSCRIBE: bad Properties Length")
 			}
 
@@ -579,7 +587,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			i += toRead
 		case propertiesLenUNSUBSCRIBE:
 			p.vhPropertyLen += uint32(rx[i]&127) * p.lenMul
-			if p.lenMul *= 128; p.lenMul > 128*128*128 {
+			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
 				return errors.New("malformed UNSUBSCRIBE: bad Properties Length")
 			}
 
@@ -614,7 +622,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			i += toRead
 		case propertiesLenCONNECT:
 			p.vhPropertyLen += uint32(rx[i]&127) * p.lenMul
-			if p.lenMul *= 128; p.lenMul > 128*128*128 {
+			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
 				return errors.New("malformed CONNECT: bad Properties Length")
 			}
 
@@ -695,7 +703,7 @@ func (s *Server) handleConnect(ses *session) error {
 			len, lenMul := 0, 1
 			for done := false; !done; offs++ {
 				len += int(p[offs]&127) * lenMul
-				if lenMul *= 128; lenMul > 128*128*128 {
+				if lenMul *= 128; lenMul > maxVarLenMul {
 					return errors.New("malformed CONNECT: bad Will Properties Length")
 				}
 
