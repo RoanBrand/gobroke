@@ -1,5 +1,6 @@
 # gobroke
 My own implementation of MQTT server. Advanced and free to use.
+Supports MQTT v3-5.
 
 ## Installation
 ```bash
@@ -16,7 +17,8 @@ if err != nil {
 }
 ```
 * `s.Run()` starts a MQTT broker listening on TCP port 1883.
-* It blocks while service is running until `s.Stop()` is called, where it returns `nil`, or it crashes for some reason.
+* It blocks while service is running until `s.Stop()` is called, or provided context is cancelled.
+* Will return `nil` if successfully shut down, or provide an error otherwise.
 
 ## Extended Configuration
 ```go
@@ -81,9 +83,20 @@ s.Run(context.Background())
 * `make test`
 
 ## TODO
+* MQTT 5:
+	* Subscription Ids
+	* Shared Subscriptions
+	* Request/Response
+	* Response Information
+	* Topic Aliases
+	* Session Expiry Interval
+	* Receive Maximum
+	* Max Packet Size
+	* Server Keep Alive
+	* AUTH
+
 * Tests to cover entire MQTT spec.
 * Persistence (levelDB?)
-* MQTT 5
 * $SYS Topic
 * User Auth system with:
     * Client whitelist & blacklist options
