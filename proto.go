@@ -341,13 +341,13 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 			i += toRead
 		case propertiesLen:
-			p.vhPropertyLen += uint32(rx[i]&127) * p.lenMul
+			p.vhPropToRead += uint32(rx[i]&127) * p.lenMul
 			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
 				return errors.New("malformed packet: bad Properties Length")
 			}
 
 			if rx[i]&128 == 0 {
-				if p.vhPropertyLen == 0 {
+				if p.vhPropToRead == 0 {
 					switch p.controlType {
 					case model.PUBLISH:
 						ses.rxState = payload
@@ -378,16 +378,16 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			p.remainingLength--
 			i++
 		case properties:
-			toRead := p.vhPropertyLen
+			toRead := p.vhPropToRead
 			if avail := l - i; avail < toRead {
 				toRead = avail
 			}
 
 			p.vhBuf = append(p.vhBuf, rx[i:i+toRead]...)
 			p.remainingLength -= toRead
-			p.vhPropertyLen -= toRead
+			p.vhPropToRead -= toRead
 
-			if p.vhPropertyLen == 0 {
+			if p.vhPropToRead == 0 {
 				switch p.controlType {
 				case model.PUBLISH:
 					if err := s.handlePublishProperties(ses); err != nil {
@@ -464,9 +464,9 @@ func (s *Server) handleConnect(ses *session) error {
 
 		ses.clientId = string(p[2:offs])
 	} else {
-		if ses.protoVersion < 5 && ses.persistent() { // [MQTT-3.1.3-7]
+		if ses.protoVersion < 5 && !ses.cleanStart() { // [MQTT-3.1.3-7]
 			ses.sendConnackFail(2) // [MQTT-3.1.3-8]
-			return errors.New("malformed CONNECT: must have ClientId present when persistent session")
+			return errors.New("malformed CONNECT: must have ClientId with CleanSession set to 0")
 		}
 
 		newUnNamed := atomic.AddUint32(&unNamedClients, 1)
@@ -598,7 +598,79 @@ func (s *Server) handleConnect(ses *session) error {
 }
 
 func (s *Server) handleConnectProperties(ses *session) error {
-	return nil // TODO: store and use Connect Properties
+	vh := ses.packet.vhBuf
+	pnLen := binary.BigEndian.Uint16(vh)
+	props := vh[pnLen+6:]
+	gotSessionExp := false
+
+	for i := 0; i < len(props); {
+		remain := len(props) - i
+		switch props[i] {
+		case 17: // Session Expiry Interval
+			if gotSessionExp {
+				return errors.New("malformed CONNECT: Session Expiry Interval included more than once")
+			}
+			if remain < 5 {
+				return errors.New("malformed CONNECT: bad Session Expiry Interval")
+			}
+
+			ses.expiryInterval = binary.BigEndian.Uint32(props[i+1:])
+			i += 5
+			gotSessionExp = true
+		case 33: // Receive Maximum
+			i += 3
+		case 39: // Maximum Packet Size
+			i += 5
+		case 34: // Topic Alias Maximum
+			i += 3
+		case 25: // Request Response Information
+			i += 2
+		case 23: // Request Problem Information
+			i += 2
+		case 38: // User Property
+			if remain < 5 {
+				return errors.New("malformed CONNECT: bad User Property")
+			}
+
+			kLen := int(binary.BigEndian.Uint16(props[i+1:]))
+			if remain < 5+kLen {
+				return errors.New("malformed CONNECT: bad User Property")
+			}
+
+			vLen := int(binary.BigEndian.Uint16(props[i+3+kLen:]))
+			expect := 5 + kLen + vLen
+			if remain < expect {
+				return errors.New("malformed CONNECT: bad User Property")
+			}
+
+			i += expect
+		case 21: // Authentication Method
+			if remain < 3 {
+				return errors.New("malformed CONNECT: bad Authentication Method Property")
+			}
+
+			l := int(binary.BigEndian.Uint16(props[i+1:]))
+			if remain < 3+l {
+				return errors.New("malformed CONNECT: bad Authentication Method Property")
+			}
+
+			i += 3 + l
+		case 22: // Authentication Data
+			if remain < 3 {
+				return errors.New("malformed CONNECT: bad Authentication Data Property")
+			}
+
+			l := int(binary.BigEndian.Uint16(props[i+1:]))
+			if remain < 3+l {
+				return errors.New("malformed CONNECT: bad Authentication Data Property")
+			}
+
+			i += 3 + l
+		default:
+			return fmt.Errorf("malformed CONNECT: unknown property %d (0x%x)", props[i], props[i])
+		}
+	}
+	return nil
 }
 
 func (s *Server) handlePublish(ses *session) error {

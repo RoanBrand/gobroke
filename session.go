@@ -26,12 +26,13 @@ type session struct {
 	onlyOnce sync.Once
 	stopped  sync.WaitGroup
 
-	clientId     string
-	assignedCId  bool
-	connectSent  bool
-	connectFlags byte
-	keepAlive    time.Duration
-	protoVersion uint8
+	clientId       string
+	assignedCId    bool
+	connectSent    bool
+	connectFlags   byte
+	protoVersion   uint8
+	keepAlive      time.Duration
+	expiryInterval uint32
 
 	will     *model.PubMessage
 	userName string
@@ -45,10 +46,10 @@ type packet struct {
 	lenMul          uint32
 
 	// Variable header
-	vhToRead      uint32
-	vhPropertyLen uint32
-	vhBuf         []byte
-	pID           uint16 // subscribe, unsubscribe, publish with QoS>0.
+	vhToRead     uint32
+	vhPropToRead uint32
+	vhBuf        []byte
+	pID          uint16 // subscribe, unsubscribe, publish with QoS>0.
 
 	payload []byte // sometimes used as temp buf for tx from reader thread
 }
@@ -369,8 +370,8 @@ func (s *session) sendUnsuback(nTopics int) error {
 	return err
 }
 
-func (s *session) persistent() bool {
-	return s.connectFlags&0x02 == 0
+func (s *session) cleanStart() bool {
+	return s.connectFlags&0x02 == 2
 }
 
 func (s *session) writePacket(p []byte) error {
@@ -396,16 +397,30 @@ func (s *Server) startSession(conn net.Conn) {
 	defer func() {
 		ns.stopped.Done()
 		ns.stop()
-		if ns.connectSent {
-			if !ns.persistent() { // [MQTT-3.1.2-6]
-				s.removeSession(&ns)
-			}
-
-			if !graceFullExit && ns.will != nil {
-				s.pubs.Add(queue.GetItem(ns.will))
-			}
-			ns.will = nil
+		if !ns.connectSent {
+			return
 		}
+
+		if ns.protoVersion < 5 {
+			if ns.cleanStart() {
+				s.removeSession(&ns) // [MQTT-3.1.2-6]
+			}
+		} else if ns.expiryInterval == 0 {
+			s.removeSession(&ns)
+		} else {
+			expireTime := time.Second * time.Duration(ns.expiryInterval)
+			// TODO: remove 10 year limit once persistence available
+			if expireTime < time.Hour*24*365*10 {
+				time.AfterFunc(expireTime, func() {
+					s.removeSession(&ns)
+				})
+			}
+		}
+
+		if !graceFullExit && ns.will != nil {
+			s.pubs.Add(queue.GetItem(ns.will))
+		}
+		ns.will = nil
 	}()
 
 	rx := make([]byte, 1024)

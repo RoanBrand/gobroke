@@ -229,11 +229,7 @@ func (s *Server) addSession(ses *session) bool {
 	c, ok := s.clients[ses.clientId] // [MQTT-3.1.2-4]
 	if ok {
 		c.session.stop()
-		log.WithFields(log.Fields{
-			"ClientId": ses.clientId,
-		}).Debug("Old session present")
-
-		if ses.persistent() && c.session.persistent() {
+		if !ses.cleanStart() && !c.session.cleanStart() {
 			sendSP = true
 		} else {
 			s.removeClientSubscriptions(c) // [MQTT-3.1.2-6]
@@ -247,6 +243,11 @@ func (s *Server) addSession(ses *session) bool {
 	ses.client = c
 	s.sesLock.Unlock()
 
+	if ok {
+		log.WithFields(log.Fields{
+			"ClientId": ses.clientId,
+		}).Debug("Old session present")
+	}
 	if sendSP {
 		log.WithFields(log.Fields{
 			"ClientId": ses.clientId,
@@ -262,19 +263,22 @@ func (s *Server) addSession(ses *session) bool {
 
 func (s *Server) removeSession(ses *session) {
 	s.sesLock.Lock()
-	defer s.sesLock.Unlock()
+
 	// check if another new session has not taken over already
 	c, ok := s.clients[ses.clientId]
 	if !ok || c.session != ses {
+		s.sesLock.Unlock()
 		return
 	}
 
-	log.WithFields(log.Fields{
-		"ClientId": ses.clientId,
-	}).Debug("Deleting client session (CleanSession)")
-
 	s.removeClientSubscriptions(ses.client)
 	delete(s.clients, ses.clientId)
+
+	s.sesLock.Unlock()
+
+	log.WithFields(log.Fields{
+		"ClientId": ses.clientId,
+	}).Debug("client session removed")
 }
 
 type topicLevel struct {
