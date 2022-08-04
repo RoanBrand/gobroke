@@ -226,15 +226,20 @@ func (s *Server) addSession(ses *session) bool {
 	sendSP := false
 
 	s.sesLock.Lock()
-	c, ok := s.clients[ses.clientId] // [MQTT-3.1.2-4]
+	c, ok := s.clients[ses.clientId] // v4[MQTT-3.1.2-4]
 	if ok {
 		c.session.stop()
-		if !ses.cleanStart() && !c.session.cleanStart() {
-			sendSP = true
-		} else {
-			s.removeClientSubscriptions(c) // [MQTT-3.1.2-6]
+
+		if ses.cleanStart() || // v4[MQTT-3.1.2-6], v5[MQTT-3.1.2-4]
+			(c.session.protoVersion < 5 && c.session.cleanStart()) ||
+			(c.session.protoVersion > 4 && c.session.expiryInterval == 0) {
+
+			s.removeClientSubscriptions(c)
 			c.clearState()
+		} else {
+			sendSP = true
 		}
+
 		c.replaceSession(ses)
 	} else {
 		s.clients[ses.clientId] = newClient(ses)
@@ -272,6 +277,7 @@ func (s *Server) removeSession(ses *session) {
 	}
 
 	s.removeClientSubscriptions(ses.client)
+	ses.client.clearState()
 	delete(s.clients, ses.clientId)
 
 	s.sesLock.Unlock()

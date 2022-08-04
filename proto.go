@@ -585,14 +585,13 @@ func (s *Server) handleConnect(ses *session) error {
 		return err
 	}
 
+	ses.connectSent = true
 	sessionIsPresent := s.addSession(ses)
 	ses.stopped.Add(1)
 	go ses.startWriter()
 
 	// [MQTT-3.2.2-1, 2-2, 2-3]
 	ses.sendConnackSuccess(sessionIsPresent)
-
-	ses.connectSent = true
 	ses.run()
 	return nil
 }

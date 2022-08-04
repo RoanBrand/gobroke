@@ -402,12 +402,12 @@ func (s *Server) startSession(conn net.Conn) {
 		}
 
 		if ns.protoVersion < 5 {
-			if ns.cleanStart() {
-				s.removeSession(&ns) // [MQTT-3.1.2-6]
+			if ns.cleanStart() { // CleanSession
+				s.removeSession(&ns) // v4[MQTT-3.1.2-6]
 			}
 		} else if ns.expiryInterval == 0 {
 			s.removeSession(&ns)
-		} else {
+		} else if ns.expiryInterval < 0xFFFFFFFF {
 			expireTime := time.Second * time.Duration(ns.expiryInterval)
 			// TODO: remove 10 year limit once persistence available
 			if expireTime < time.Hour*24*365*10 {
