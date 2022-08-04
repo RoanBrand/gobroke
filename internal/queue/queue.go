@@ -47,12 +47,11 @@ func (q *Basic) StartDispatcher(ctx context.Context, d func(*Item) error, wg *sy
 		}
 	}()
 	for {
-		q.Lock()
-
 		if ctx.Err() != nil {
-			q.Unlock()
 			return
 		}
+
+		q.Lock()
 
 		if q.h == nil {
 			q.trig.Wait()

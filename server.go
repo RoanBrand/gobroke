@@ -118,7 +118,7 @@ func (s *Server) Stop() {
 	s.sesLock.Lock()
 	for _, c := range s.clients {
 		if c.session != nil {
-			c.session.stop()
+			c.session.end(139) // Server shutting down
 		}
 	}
 	s.sesLock.Unlock()
@@ -228,7 +228,7 @@ func (s *Server) addSession(ses *session) bool {
 	s.sesLock.Lock()
 	c, ok := s.clients[ses.clientId] // v4[MQTT-3.1.2-4]
 	if ok {
-		c.session.stop()
+		c.session.end(142) // Session taken over
 
 		if ses.cleanStart() || // v4[MQTT-3.1.2-6], v5[MQTT-3.1.2-4]
 			(c.session.protoVersion < 5 && c.session.cleanStart()) ||

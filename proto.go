@@ -40,8 +40,7 @@ var (
 
 	pingRespPacket = []byte{model.PINGRESP, 0}
 
-	// server got DISCONNECT packet. Do not send will on connection close.
-	errCleanExit = errors.New("cleanExit")
+	errGotDisconnect = errors.New("DISCONNECT")
 )
 
 func (s *Server) parseStream(ses *session, rx []byte) error {
@@ -85,15 +84,15 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					return errors.New("malformed UNSUBSCRIBE: bad fixed header reserved flags")
 				}
 			case model.DISCONNECT:
-				if p.flags != 0 {
+				if p.flags != 0 { // [MQTT-3.14.1-1]
+					if ses.protoVersion == 5 {
+						ses.disconnectReasonCode = 129 // Malformed Packet
+						return errGotDisconnect
+					}
 					return errors.New("malformed DISCONNECT: fixed header flags must be 0 (reserved)")
 				}
 
-				log.WithFields(log.Fields{
-					"ClientId": ses.clientId,
-				}).Debug("DISCONNECT received")
-
-				return errCleanExit
+				return errGotDisconnect
 			case model.CONNECT:
 				if ses.connectSent { // [MQTT-3.1.0-2]
 					return errors.New("second CONNECT packet received")
@@ -172,6 +171,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					rawQoS := p.flags & 0x06
 					if rawQoS > 0 { // Qos > 0
 						if rawQoS == 6 { // [MQTT-3.3.1-4]
+							ses.disconnectReasonCode = 129 // Malformed Packet
 							return errors.New("malformed PUBLISH: no QoS3 allowed")
 						}
 
@@ -587,7 +587,7 @@ func (s *Server) handleConnect(ses *session) error {
 
 	ses.connectSent = true
 	sessionIsPresent := s.addSession(ses)
-	ses.stopped.Add(1)
+	ses.ended.Add(1)
 	go ses.startWriter()
 
 	// [MQTT-3.2.2-1, 2-2, 2-3]
