@@ -89,7 +89,6 @@ s.Run(context.Background())
 	* Request/Response
 	* Response Information
 	* Topic Aliases
-	* Session Expiry Interval
 	* Receive Maximum
 	* Max Packet Size
 	* Server Keep Alive

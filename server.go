@@ -118,7 +118,7 @@ func (s *Server) Stop() {
 	s.sesLock.Lock()
 	for _, c := range s.clients {
 		if c.session != nil {
-			c.session.stop()
+			c.session.end(model.ServerShuttingDown)
 		}
 	}
 	s.sesLock.Unlock()
@@ -226,19 +226,20 @@ func (s *Server) addSession(ses *session) bool {
 	sendSP := false
 
 	s.sesLock.Lock()
-	c, ok := s.clients[ses.clientId] // [MQTT-3.1.2-4]
+	c, ok := s.clients[ses.clientId] // v4[MQTT-3.1.2-4]
 	if ok {
-		c.session.stop()
-		log.WithFields(log.Fields{
-			"ClientId": ses.clientId,
-		}).Debug("Old session present")
+		c.session.end(model.SessionTakenOver)
 
-		if ses.persistent() && c.session.persistent() {
-			sendSP = true
-		} else {
-			s.removeClientSubscriptions(c) // [MQTT-3.1.2-6]
+		if ses.cleanStart() || // v4[MQTT-3.1.2-6], v5[MQTT-3.1.2-4]
+			(c.session.protoVersion < 5 && c.session.cleanStart()) ||
+			(c.session.protoVersion > 4 && c.session.expiryInterval == 0) {
+
+			s.removeClientSubscriptions(c)
 			c.clearState()
+		} else {
+			sendSP = true
 		}
+
 		c.replaceSession(ses)
 	} else {
 		s.clients[ses.clientId] = newClient(ses)
@@ -247,6 +248,11 @@ func (s *Server) addSession(ses *session) bool {
 	ses.client = c
 	s.sesLock.Unlock()
 
+	if ok {
+		log.WithFields(log.Fields{
+			"ClientId": ses.clientId,
+		}).Debug("Old session present")
+	}
 	if sendSP {
 		log.WithFields(log.Fields{
 			"ClientId": ses.clientId,
@@ -262,19 +268,23 @@ func (s *Server) addSession(ses *session) bool {
 
 func (s *Server) removeSession(ses *session) {
 	s.sesLock.Lock()
-	defer s.sesLock.Unlock()
+
 	// check if another new session has not taken over already
 	c, ok := s.clients[ses.clientId]
 	if !ok || c.session != ses {
+		s.sesLock.Unlock()
 		return
 	}
 
+	s.removeClientSubscriptions(ses.client)
+	ses.client.clearState()
+	delete(s.clients, ses.clientId)
+
+	s.sesLock.Unlock()
+
 	log.WithFields(log.Fields{
 		"ClientId": ses.clientId,
-	}).Debug("Deleting client session (CleanSession)")
-
-	s.removeClientSubscriptions(ses.client)
-	delete(s.clients, ses.clientId)
+	}).Debug("client session removed")
 }
 
 type topicLevel struct {

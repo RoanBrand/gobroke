@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
-	"strings"
+	"os"
 	"sync"
 	"time"
 
@@ -14,6 +14,8 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+var aLongTimeAgo = time.Unix(1, 0) // used for cancellation
+
 type session struct {
 	client *client
 	conn   net.Conn
@@ -21,17 +23,19 @@ type session struct {
 	packet  packet
 	rxState uint8
 
-	ctx      context.Context
-	cancel   context.CancelFunc
-	onlyOnce sync.Once
-	stopped  sync.WaitGroup
+	onlyOnce             sync.Once
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	ended                sync.WaitGroup
+	disconnectReasonCode uint8
 
-	clientId     string
-	assignedCId  bool
-	connectSent  bool
-	connectFlags byte
-	keepAlive    time.Duration
-	protoVersion uint8
+	clientId       string
+	assignedCId    bool
+	connectSent    bool
+	connectFlags   byte
+	protoVersion   uint8
+	keepAlive      time.Duration
+	expiryInterval uint32
 
 	will     *model.PubMessage
 	userName string
@@ -45,10 +49,10 @@ type packet struct {
 	lenMul          uint32
 
 	// Variable header
-	vhToRead      uint32
-	vhPropertyLen uint32
-	vhBuf         []byte
-	pID           uint16 // subscribe, unsubscribe, publish with QoS>0.
+	vhToRead     uint32
+	vhPropToRead uint32
+	vhBuf        []byte
+	pID          uint16 // subscribe, unsubscribe, publish with QoS>0.
 
 	payload []byte // sometimes used as temp buf for tx from reader thread
 }
@@ -75,10 +79,10 @@ func (s *session) run() {
 		}).Error("Unable to resend all pending QoS1 PUBLISHs")
 	}
 
-	s.stopped.Add(3)
-	go c.q0.StartDispatcher(s.ctx, s.sendPublish, &s.stopped)
-	go c.q1.StartDispatcher(s.ctx, s.sendPublish, s.getPId, &s.stopped)
-	go c.q2.StartDispatcher(s.ctx, s.sendPublish, s.getPId, &s.stopped)
+	s.ended.Add(3)
+	go c.q0.StartDispatcher(s.ctx, s.sendPublish, &s.ended)
+	go c.q1.StartDispatcher(s.ctx, s.sendPublish, s.getPId, &s.ended)
+	go c.q2.StartDispatcher(s.ctx, s.sendPublish, s.getPId, &s.ended)
 
 	// QoS 1&2 unacknowledged message resend timeout in ms
 	// Set to 0 to disable. Will always resend once on new conn.
@@ -86,24 +90,50 @@ func (s *session) run() {
 	var retryInterval uint64 = 50000
 
 	if s.protoVersion != 5 && retryInterval > 0 {
-		s.stopped.Add(3)
-		go c.q2Stage2.MonitorTimeouts(s.ctx, retryInterval, s.sendPubrelFromQueue, &s.stopped)
-		go c.q1.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.stopped)
-		go c.q2.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.stopped)
+		s.ended.Add(3)
+		go c.q2Stage2.MonitorTimeouts(s.ctx, retryInterval, s.sendPubrelFromQueue, &s.ended)
+		go c.q1.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.ended)
+		go c.q2.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.ended)
 	}
 }
 
-func (s *session) stop() {
+func (s *session) end(disconnectRC uint8) {
 	s.onlyOnce.Do(func() {
+		s.conn.SetReadDeadline(aLongTimeAgo)
 		s.cancel()
-		s.conn.Close()
-		if c := s.client; c != nil {
-			c.notifyFlusher()
+
+		c := s.client
+		if c != nil {
 			c.q0.NotifyDispatcher()
 			c.q1.NotifyDispatcher()
 			c.q2.NotifyDispatcher()
 		}
-		s.stopped.Wait()
+
+		s.ended.Wait()
+		var err error
+
+		if c != nil {
+			c.txLock.Lock()
+			err = c.tx.Flush()
+			c.tx.Reset(nil)
+			c.txLock.Unlock()
+		}
+		if err != nil {
+			log.WithFields(log.Fields{
+				"ClientId": s.clientId,
+				"err":      err,
+			}).Error("failed to flush tx buffer")
+		}
+
+		if err = s.sendDisconnect(disconnectRC); err != nil {
+			log.WithFields(log.Fields{
+				"ClientId": s.clientId,
+				"err":      err,
+			}).Error("failed to send DISCONNECT")
+		}
+
+		s.conn.Close()
+		s.conn = nil
 	})
 }
 
@@ -117,6 +147,32 @@ func (s *session) handlePubrel() error {
 	pId := binary.BigEndian.Uint16(s.packet.vhBuf)
 	delete(s.client.q2RxLookup, pId)
 	return s.sendPubcomp()
+}
+
+func (s *session) handleDisconnect() error {
+	switch s.packet.vhBuf[0] {
+	case model.NormalDisconnection:
+		log.WithFields(log.Fields{
+			"ClientId": s.clientId,
+			"Reason":   "Normal disconnection",
+		}).Debug("DISCONNECT received")
+
+		return errGotNormalDiscon
+	case model.DisconnectWithWill:
+		log.WithFields(log.Fields{
+			"ClientId": s.clientId,
+			"Reason":   "Disconnect with Will Msg",
+		}).Debug("DISCONNECT received")
+
+		return errGotDisconWithWill
+	default:
+		log.WithFields(log.Fields{
+			"ClientId":    s.clientId,
+			"Reason Code": s.packet.vhBuf[0],
+		}).Debug("DISCONNECT received")
+
+		return nil
+	}
 }
 
 func (s *session) getPId() uint16 {
@@ -279,7 +335,6 @@ func (s *session) sendPubrel(pId uint16, dupV3 bool) error {
 	return s.writePacket(p)
 }
 
-//
 func (s *session) sendPubrelFromQueue(i *queue.Item) error {
 	var header byte = model.PUBRELSend
 	if s.protoVersion == 3 && !i.Sent.IsZero() {
@@ -369,8 +424,20 @@ func (s *session) sendUnsuback(nTopics int) error {
 	return err
 }
 
-func (s *session) persistent() bool {
-	return s.connectFlags&0x02 == 0
+func (s *session) sendDisconnect(disconnectRC uint8) error {
+	if s.protoVersion < 5 || disconnectRC == 0 {
+		return nil
+	}
+
+	p := s.packet.payload[:0]
+	p = append(p, model.DISCONNECT, 1, disconnectRC)
+
+	_, err := s.conn.Write(p)
+	return err
+}
+
+func (s *session) cleanStart() bool {
+	return s.connectFlags&0x02 == 2
 }
 
 func (s *session) writePacket(p []byte) error {
@@ -391,17 +458,34 @@ func (s *Server) startSession(conn net.Conn) {
 	ns := session{ctx: ctx, cancel: cancel, conn: conn}
 	ns.packet.vhBuf, ns.packet.payload = make([]byte, 0, 512), make([]byte, 0, 512)
 
-	ns.stopped.Add(1)
-	graceFullExit := false
-	defer func() {
-		ns.stopped.Done()
-		ns.stop()
-		if ns.connectSent {
-			if !ns.persistent() { // [MQTT-3.1.2-6]
-				s.removeSession(&ns)
-			}
+	var err error
+	ns.ended.Add(1)
 
-			if !graceFullExit && ns.will != nil {
+	defer func() {
+		ns.ended.Done()
+		ns.end(ns.disconnectReasonCode)
+		if !ns.connectSent {
+			return
+		}
+
+		if ns.protoVersion < 5 {
+			if ns.cleanStart() { // CleanSession
+				s.removeSession(&ns) // v4[MQTT-3.1.2-6]
+			}
+		} else if ns.expiryInterval == 0 {
+			s.removeSession(&ns)
+		} else if ns.expiryInterval < 0xFFFFFFFF {
+			expireTime := time.Second * time.Duration(ns.expiryInterval)
+			// TODO: remove 10 year limit once persistence available
+			if expireTime < time.Hour*24*365*10 {
+				time.AfterFunc(expireTime, func() {
+					s.removeSession(&ns)
+				})
+			}
+		}
+
+		if ns.will != nil {
+			if err != errGotNormalDiscon {
 				s.pubs.Add(queue.GetItem(ns.will))
 			}
 			ns.will = nil
@@ -409,9 +493,10 @@ func (s *Server) startSession(conn net.Conn) {
 	}()
 
 	rx := make([]byte, 1024)
+	var nRx int
 
 	for {
-		nRx, err := conn.Read(rx)
+		nRx, err = conn.Read(rx)
 		if err != nil {
 			ns.readError(err)
 			return
@@ -428,14 +513,7 @@ func (s *Server) startSession(conn net.Conn) {
 		}
 
 		if err = s.parseStream(&ns, rx[:nRx]); err != nil {
-			if err == errCleanExit {
-				graceFullExit = true
-			} else {
-				log.WithFields(log.Fields{
-					"ClientId": ns.clientId,
-					"err":      err,
-				}).Debug("client failure")
-			}
+			ns.handleParseError(err)
 			return
 		}
 
@@ -443,21 +521,14 @@ func (s *Server) startSession(conn net.Conn) {
 	}
 
 	for {
-		nRx, err := conn.Read(rx)
+		nRx, err = conn.Read(rx)
 		if err != nil {
 			ns.readError(err)
 			return
 		}
 
 		if err = s.parseStream(&ns, rx[:nRx]); err != nil {
-			if err == errCleanExit {
-				graceFullExit = true
-			} else {
-				log.WithFields(log.Fields{
-					"ClientId": ns.clientId,
-					"err":      err,
-				}).Debug("client failure")
-			}
+			ns.handleParseError(err)
 			return
 		}
 	}
@@ -468,8 +539,11 @@ func (s *session) readError(err error) {
 		return
 	}
 
-	// KeepAlive timeout
-	if strings.Contains(err.Error(), "i/o timeout") {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		if s.ctx.Err() != nil {
+			return // because of session ended
+		}
+
 		l := log.WithFields(log.Fields{
 			"ClientId": s.clientId,
 		})
@@ -487,8 +561,19 @@ func (s *session) readError(err error) {
 	}).Error("TCP RX error")
 }
 
+func (s *session) handleParseError(err error) {
+	if err == errGotNormalDiscon || err == errGotDisconWithWill {
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"ClientId": s.clientId,
+		"err":      err,
+	}).Debug("client failure")
+}
+
 func (s *session) startWriter() {
-	defer s.stopped.Done()
+	defer s.ended.Done()
 	done := s.ctx.Done()
 
 	for {
