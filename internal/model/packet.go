@@ -31,6 +31,22 @@ const (
 	SessionTakenOver    = 142
 )
 
+// Properties
+const (
+	SessionExpiryInterval      = 17
+	AssignedClientIdentifier   = 18
+	AuthenticationMethod       = 21
+	AuthenticationData         = 22
+	RequestProblemInformation  = 23
+	RequestResponseInformation = 25
+	ServerReference            = 28
+	ReasonString               = 31
+	ReceiveMaximum             = 33
+	TopicAliasMaximum          = 34
+	UserProperty               = 38
+	MaximumPacketSize          = 39
+)
+
 func VariableLengthEncode(packet []byte, l int) []byte {
 	for {
 		eb := l % 128

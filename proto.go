@@ -626,13 +626,13 @@ func (s *Server) handleConnectProperties(ses *session) error {
 	vh := ses.packet.vhBuf
 	pnLen := binary.BigEndian.Uint16(vh)
 	props := vh[pnLen+6:]
-	gotSessionExp := false
+	gotSesExp := false
 
 	for i := 0; i < len(props); {
 		remain := len(props) - i
 		switch props[i] {
-		case 17: // Session Expiry Interval
-			if gotSessionExp {
+		case model.SessionExpiryInterval:
+			if gotSesExp {
 				return errors.New("malformed CONNECT: Session Expiry Interval included more than once")
 			}
 			if remain < 5 {
@@ -640,19 +640,19 @@ func (s *Server) handleConnectProperties(ses *session) error {
 			}
 
 			ses.expiryInterval = binary.BigEndian.Uint32(props[i+1:])
+			gotSesExp = true
 			i += 5
-			gotSessionExp = true
-		case 33: // Receive Maximum
+		case model.ReceiveMaximum:
 			i += 3
-		case 39: // Maximum Packet Size
+		case model.MaximumPacketSize:
 			i += 5
-		case 34: // Topic Alias Maximum
+		case model.TopicAliasMaximum:
 			i += 3
-		case 25: // Request Response Information
+		case model.RequestResponseInformation:
 			i += 2
-		case 23: // Request Problem Information
+		case model.RequestProblemInformation:
 			i += 2
-		case 38: // User Property
+		case model.UserProperty:
 			if remain < 5 {
 				return errors.New("malformed CONNECT: bad User Property")
 			}
@@ -669,7 +669,7 @@ func (s *Server) handleConnectProperties(ses *session) error {
 			}
 
 			i += expect
-		case 21: // Authentication Method
+		case model.AuthenticationMethod:
 			if remain < 3 {
 				return errors.New("malformed CONNECT: bad Authentication Method Property")
 			}
@@ -680,7 +680,7 @@ func (s *Server) handleConnectProperties(ses *session) error {
 			}
 
 			i += 3 + l
-		case 22: // Authentication Data
+		case model.AuthenticationData:
 			if remain < 3 {
 				return errors.New("malformed CONNECT: bad Authentication Data Property")
 			}
@@ -822,7 +822,69 @@ func (s *Server) handleUnSubscribeProperties(ses *session) error {
 }
 
 func (s *Server) handleDisconnectProperties(ses *session) error {
-	// TODO: store and use Disconnect Properties
+	props := ses.packet.vhBuf[1:]
+	gotSesExp, gotReasonStr := false, false
+
+	for i := 0; i < len(props); {
+		remain := len(props) - i
+
+		switch props[i] {
+		case model.SessionExpiryInterval:
+			if gotSesExp {
+				return errors.New("malformed DISCONNECT: Session Expiry Interval included more than once")
+			}
+			if remain < 5 {
+				return errors.New("malformed DISCONNECT: bad Session Expiry Interval")
+			}
+
+			newExp := binary.BigEndian.Uint32(props[i+1:])
+			if ses.expiryInterval == 0 && newExp != 0 {
+				ses.disconnectReasonCode = model.ProtocolError
+				return errors.New("malformed DISCONNECT: bad Session Expiry Interval")
+			}
+
+			ses.expiryInterval = newExp
+			gotSesExp = true
+			i += 5
+		case model.ReasonString:
+			if gotReasonStr {
+				return errors.New("malformed DISCONNECT: Reason String included more than once")
+			}
+			if remain < 3 {
+				return errors.New("malformed DISCONNECT: bad Reason String")
+			}
+
+			l := int(binary.BigEndian.Uint16(props[i+1:]))
+			if remain < 3+l {
+				return errors.New("malformed DISCONNECT: bad Reason String")
+			}
+
+			gotReasonStr = true
+			i += 3 + l
+		case model.UserProperty:
+			if remain < 5 {
+				return errors.New("malformed DISCONNECT: bad User Property")
+			}
+
+			kLen := int(binary.BigEndian.Uint16(props[i+1:]))
+			if remain < 5+kLen {
+				return errors.New("malformed DISCONNECT: bad User Property")
+			}
+
+			vLen := int(binary.BigEndian.Uint16(props[i+3+kLen:]))
+			expect := 5 + kLen + vLen
+			if remain < expect {
+				return errors.New("malformed DISCONNECT: bad User Property")
+			}
+
+			i += expect
+		case model.ServerReference:
+			return errors.New("malformed DISCONNECT: Server Reference should only be sent by Server")
+		default:
+			return fmt.Errorf("malformed DISCONNECT: unknown property %d (0x%x)", props[i], props[i])
+		}
+	}
+
 	return ses.handleDisconnect()
 }
 
