@@ -280,7 +280,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						if ses.protoVersion < 5 {
 							ses.sendConnackFail(1) // [MQTT-3.1.2-2]
 						} else {
-							ses.sendConnackFail(132)
+							ses.sendConnackFail(model.UnsupportedProtocolVersion)
 						}
 
 						return errors.New("unsupported client protocol. Must be MQTT v3.1 (3), v3.1.1 (4) or v5 (5)")
@@ -314,10 +314,11 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					}
 				}
 
-				p.payload = p.payload[:0]
+				//p.payload = p.payload[:0]
 				if p.remainingLength == 0 {
 					ses.updateTimeout()
 					if p.controlType == model.PUBLISH {
+						p.payload = p.payload[:0]
 						if err := s.handlePublish(ses); err != nil {
 							return err
 						}
@@ -327,6 +328,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					p.lenMul = 1
 					ses.rxState = propertiesLen
 				} else {
+					p.payload = p.payload[:0]
 					ses.rxState = payload
 				}
 			}
@@ -372,6 +374,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				if p.vhPropToRead == 0 {
 					switch p.controlType {
 					case model.PUBLISH:
+						p.payload = p.payload[:0]
 						ses.rxState = payload
 					case model.PUBACK:
 						ses.client.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
@@ -392,6 +395,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					case model.DISCONNECT:
 						return ses.handleDisconnect()
 					default: // subscribe, unsubscribe, connect
+						p.payload = p.payload[:0]
 						ses.rxState = payload
 					}
 				} else {
@@ -417,6 +421,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					if err := s.handlePublishProperties(ses); err != nil {
 						return err
 					}
+					p.payload = p.payload[:0]
 					ses.rxState = payload
 				case model.PUBACK:
 					// TODO: handle PUBACK props
@@ -442,16 +447,19 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					if err := s.handleSubscribeProperties(ses); err != nil {
 						return err
 					}
+					p.payload = p.payload[:0]
 					ses.rxState = payload
 				case model.UNSUBSCRIBE:
 					if err := s.handleUnSubscribeProperties(ses); err != nil {
 						return err
 					}
+					p.payload = p.payload[:0]
 					ses.rxState = payload
 				case model.CONNECT:
 					if err := s.handleConnectProperties(ses); err != nil {
 						return err
 					}
+					p.payload = p.payload[:0]
 					ses.rxState = payload
 				case model.DISCONNECT:
 					return s.handleDisconnectProperties(ses)
@@ -626,7 +634,7 @@ func (s *Server) handleConnectProperties(ses *session) error {
 	vh := ses.packet.vhBuf
 	pnLen := binary.BigEndian.Uint16(vh)
 	props := vh[pnLen+6:]
-	gotSesExp := false
+	gotSesExp, gotRxMax, gotMaxPSize, gotTopAlias, gotRRI, gotRPI := false, false, false, false, false, false
 
 	for i := 0; i < len(props); {
 		remain := len(props) - i
@@ -643,14 +651,72 @@ func (s *Server) handleConnectProperties(ses *session) error {
 			gotSesExp = true
 			i += 5
 		case model.ReceiveMaximum:
+			if gotRxMax {
+				return errors.New("malformed CONNECT: Receive Maximum included more than once")
+			}
+			if remain < 3 {
+				return errors.New("malformed CONNECT: bad Receive Maximum")
+			}
+
+			ses.receiveMax = binary.BigEndian.Uint16(props[i+1:])
+			if ses.receiveMax == 0 {
+				return errors.New("malformed CONNECT: Receive Maximum 0 not allowed")
+			}
+
+			gotRxMax = true
 			i += 3
 		case model.MaximumPacketSize:
+			if gotMaxPSize {
+				return errors.New("malformed CONNECT: Maximum Packet Size included more than once")
+			}
+			if remain < 5 {
+				return errors.New("malformed CONNECT: bad Maximum Packet Size")
+			}
+
+			ses.maxPacketSize = binary.BigEndian.Uint32(props[i+1:])
+			if ses.maxPacketSize == 0 {
+				return errors.New("malformed CONNECT: Maximum Packet Size 0 not allowed")
+			}
+
+			gotMaxPSize = true
 			i += 5
 		case model.TopicAliasMaximum:
+			if gotTopAlias {
+				return errors.New("malformed CONNECT: Topic Alias Maximum included more than once")
+			}
+			if remain < 3 {
+				return errors.New("malformed CONNECT: bad Topic Alias Maximum")
+			}
+
+			ses.topicAliasMax = binary.BigEndian.Uint16(props[i+1:])
+			gotTopAlias = true
 			i += 3
 		case model.RequestResponseInformation:
+			if gotRRI {
+				return errors.New("malformed CONNECT: Request Response Information included more than once")
+			}
+			if remain < 1 {
+				return errors.New("malformed CONNECT: bad Request Response Information")
+			}
+			if props[i+1] != 0 && props[i+1] != 1 {
+				return errors.New("malformed CONNECT: bad Request Response Information")
+			}
+
+			gotRRI = true
 			i += 2
 		case model.RequestProblemInformation:
+			if gotRPI {
+				return errors.New("malformed CONNECT: Request Problem Information included more than once")
+			}
+			if remain < 1 {
+				return errors.New("malformed CONNECT: bad Request Problem Information")
+			}
+			if props[i+1] != 0 && props[i+1] != 1 {
+				return errors.New("malformed CONNECT: bad Request Problem Information")
+			}
+
+			ses.reqProblemInfo = props[i+1] == 1
+			gotRPI = true
 			i += 2
 		case model.UserProperty:
 			if remain < 5 {

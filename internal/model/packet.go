@@ -22,13 +22,14 @@ const (
 
 // Reason Codes
 const (
-	NormalDisconnection = 0
-	DisconnectWithWill  = 4
-	MalformedPacket     = 129
-	ProtocolError       = 130
-	ServerShuttingDown  = 139
-	KeepAliveTimeout    = 141
-	SessionTakenOver    = 142
+	NormalDisconnection        = 0
+	DisconnectWithWill         = 4
+	MalformedPacket            = 129
+	ProtocolError              = 130
+	UnsupportedProtocolVersion = 132
+	ServerShuttingDown         = 139
+	KeepAliveTimeout           = 141
+	SessionTakenOver           = 142
 )
 
 // Properties

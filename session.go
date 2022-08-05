@@ -36,6 +36,10 @@ type session struct {
 	protoVersion   uint8
 	keepAlive      time.Duration
 	expiryInterval uint32
+	maxPacketSize  uint32
+	receiveMax     uint16
+	topicAliasMax  uint16
+	reqProblemInfo bool
 
 	will     *model.PubMessage
 	userName string
@@ -455,7 +459,13 @@ func (s *session) writePacket(p []byte) error {
 func (s *Server) startSession(conn net.Conn) {
 	ctx, cancel := context.WithCancel(s.ctx)
 	conn.SetReadDeadline(time.Now().Add(time.Second * 10)) // CONNECT packet timeout
-	ns := session{ctx: ctx, cancel: cancel, conn: conn}
+	ns := session{
+		ctx:            ctx,
+		cancel:         cancel,
+		conn:           conn,
+		receiveMax:     65535,
+		reqProblemInfo: true,
+	}
 	ns.packet.vhBuf, ns.packet.payload = make([]byte, 0, 512), make([]byte, 0, 512)
 
 	var err error
