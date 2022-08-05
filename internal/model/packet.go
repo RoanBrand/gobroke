@@ -20,6 +20,17 @@ const (
 	PUBRELSend = PUBREL | 2
 )
 
+// Reason Codes
+const (
+	NormalDisconnection = 0
+	DisconnectWithWill  = 4
+	MalformedPacket     = 129
+	ProtocolError       = 130
+	ServerShuttingDown  = 139
+	KeepAliveTimeout    = 141
+	SessionTakenOver    = 142
+)
+
 func VariableLengthEncode(packet []byte, l int) []byte {
 	for {
 		eb := l % 128

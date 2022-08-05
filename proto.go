@@ -40,7 +40,11 @@ var (
 
 	pingRespPacket = []byte{model.PINGRESP, 0}
 
-	errGotDisconnect = errors.New("DISCONNECT")
+	// Close the connection normally. Do not send the Will Message.
+	errGotNormalDiscon = errors.New("Normal")
+	// The Client wishes to disconnect but requires
+	// that the Server also publishes its Will Message.
+	errGotDisconWithWill = errors.New("WithWill")
 )
 
 func (s *Server) parseStream(ses *session, rx []byte) error {
@@ -85,14 +89,9 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				}
 			case model.DISCONNECT:
 				if p.flags != 0 { // [MQTT-3.14.1-1]
-					if ses.protoVersion == 5 {
-						ses.disconnectReasonCode = 129 // Malformed Packet
-						return errGotDisconnect
-					}
+					ses.disconnectReasonCode = model.MalformedPacket
 					return errors.New("malformed DISCONNECT: fixed header flags must be 0 (reserved)")
 				}
-
-				return errGotDisconnect
 			case model.CONNECT:
 				if ses.connectSent { // [MQTT-3.1.0-2]
 					return errors.New("second CONNECT packet received")
@@ -115,7 +114,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 			if rx[i]&128 == 0 {
 				switch p.controlType {
-				case model.PUBLISH, model.CONNECT:
+				case model.PUBLISH:
 					p.vhToRead = 2
 					p.vhBuf = p.vhBuf[:0]
 					ses.rxState = variableHeaderLen
@@ -151,6 +150,25 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 					ses.updateTimeout()
 					ses.rxState = controlAndFlags
+				case model.CONNECT:
+					p.vhToRead = 2
+					p.vhBuf = p.vhBuf[:0]
+					ses.rxState = variableHeaderLen
+				case model.DISCONNECT:
+					if p.remainingLength == 0 {
+						log.WithFields(log.Fields{
+							"ClientId": ses.clientId,
+							"Reason":   "Normal disconnection",
+						}).Debug("DISCONNECT received")
+
+						return errGotNormalDiscon
+					} else if ses.protoVersion < 5 {
+						return errors.New("malformed DISCONNECT: proto < v5")
+					}
+
+					p.vhToRead = 1 // Reason Code
+					p.vhBuf = p.vhBuf[:0]
+					ses.rxState = variableHeader
 				}
 			}
 
@@ -171,7 +189,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					rawQoS := p.flags & 0x06
 					if rawQoS > 0 { // Qos > 0
 						if rawQoS == 6 { // [MQTT-3.3.1-4]
-							ses.disconnectReasonCode = 129 // Malformed Packet
+							ses.disconnectReasonCode = model.MalformedPacket
 							return errors.New("malformed PUBLISH: no QoS3 allowed")
 						}
 
@@ -290,6 +308,10 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 					// [MQTT-3.1.2-24]
 					ses.keepAlive = time.Duration(binary.BigEndian.Uint16(p.vhBuf[4+pnLen:])) * time.Second * 3 / 2
+				case model.DISCONNECT:
+					if p.remainingLength == 0 {
+						return ses.handleDisconnect()
+					}
 				}
 
 				p.payload = p.payload[:0]
@@ -301,7 +323,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						}
 					}
 					ses.rxState = controlAndFlags
-				} else if ses.protoVersion == 5 {
+				} else if ses.protoVersion > 4 {
 					p.lenMul = 1
 					ses.rxState = propertiesLen
 				} else {
@@ -367,6 +389,8 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					case model.PUBCOMP:
 						ses.client.qos2Part2Done(binary.BigEndian.Uint16(p.vhBuf))
 						ses.rxState = controlAndFlags
+					case model.DISCONNECT:
+						return ses.handleDisconnect()
 					default: // subscribe, unsubscribe, connect
 						ses.rxState = payload
 					}
@@ -429,6 +453,8 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						return err
 					}
 					ses.rxState = payload
+				case model.DISCONNECT:
+					return s.handleDisconnectProperties(ses)
 				}
 			}
 
@@ -793,6 +819,11 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 
 func (s *Server) handleUnSubscribeProperties(ses *session) error {
 	return nil // TODO: store and use Unsubscribe Properties
+}
+
+func (s *Server) handleDisconnectProperties(ses *session) error {
+	// TODO: store and use Disconnect Properties
+	return ses.handleDisconnect()
 }
 
 var errInvalidUTF = errors.New("invalid UTF8")

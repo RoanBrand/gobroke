@@ -149,6 +149,32 @@ func (s *session) handlePubrel() error {
 	return s.sendPubcomp()
 }
 
+func (s *session) handleDisconnect() error {
+	switch s.packet.vhBuf[0] {
+	case model.NormalDisconnection:
+		log.WithFields(log.Fields{
+			"ClientId": s.clientId,
+			"Reason":   "Normal disconnection",
+		}).Debug("DISCONNECT received")
+
+		return errGotNormalDiscon
+	case model.DisconnectWithWill:
+		log.WithFields(log.Fields{
+			"ClientId": s.clientId,
+			"Reason":   "Disconnect with Will Msg",
+		}).Debug("DISCONNECT received")
+
+		return errGotDisconWithWill
+	default:
+		log.WithFields(log.Fields{
+			"ClientId":    s.clientId,
+			"Reason Code": s.packet.vhBuf[0],
+		}).Debug("DISCONNECT received")
+
+		return nil
+	}
+}
+
 func (s *session) getPId() uint16 {
 	return <-s.client.pIDs
 }
@@ -459,7 +485,7 @@ func (s *Server) startSession(conn net.Conn) {
 		}
 
 		if ns.will != nil {
-			if err != errGotDisconnect || ns.disconnectReasonCode != 0 {
+			if err != errGotNormalDiscon {
 				s.pubs.Add(queue.GetItem(ns.will))
 			}
 			ns.will = nil
@@ -487,12 +513,7 @@ func (s *Server) startSession(conn net.Conn) {
 		}
 
 		if err = s.parseStream(&ns, rx[:nRx]); err != nil {
-			if err != errGotDisconnect {
-				log.WithFields(log.Fields{
-					"ClientId": ns.clientId,
-					"err":      err,
-				}).Debug("client failure")
-			}
+			ns.handleParseError(err)
 			return
 		}
 
@@ -507,12 +528,7 @@ func (s *Server) startSession(conn net.Conn) {
 		}
 
 		if err = s.parseStream(&ns, rx[:nRx]); err != nil {
-			if err != errGotDisconnect {
-				log.WithFields(log.Fields{
-					"ClientId": ns.clientId,
-					"err":      err,
-				}).Debug("client failure")
-			}
+			ns.handleParseError(err)
 			return
 		}
 	}
@@ -543,6 +559,17 @@ func (s *session) readError(err error) {
 		"ClientId": s.clientId,
 		"err":      err,
 	}).Error("TCP RX error")
+}
+
+func (s *session) handleParseError(err error) {
+	if err == errGotNormalDiscon || err == errGotDisconWithWill {
+		return
+	}
+
+	log.WithFields(log.Fields{
+		"ClientId": s.clientId,
+		"err":      err,
+	}).Debug("client failure")
 }
 
 func (s *session) startWriter() {
