@@ -512,17 +512,12 @@ func (s *Server) handleConnect(ses *session) error {
 	if ses.connectFlags&0x04 > 0 {
 		// Properties
 		if ses.protoVersion == 5 {
-			len, lenMul := 0, 1
-			for done := false; !done; offs++ {
-				len += int(p[offs]&127) * lenMul
-				if lenMul *= 128; lenMul > maxVarLenMul {
-					return errors.New("malformed CONNECT: bad Will Properties Length")
-				}
-
-				done = p[offs]&128 == 0
+			wpLen, vbLen, err := variableLengthDecode(p[offs:])
+			if err != nil {
+				return errors.New("malformed CONNECT: bad Will Properties Length")
 			}
-
-			offs += uint32(len) // TODO: store and use Will Properties
+			// TODO: store and use Will Properties
+			offs += uint32(vbLen) + uint32(wpLen)
 		}
 
 		// Topic
@@ -612,7 +607,7 @@ func (s *Server) handleConnect(ses *session) error {
 	}
 
 	if offs != pLen {
-		return errors.New("malformed CONNECT: unexpected extra payload fields (Will Topic, Will Message, User Name or Password)")
+		return errors.New("malformed CONNECT: unexpected extra payload fields (Will Properties, Topic, Message, or User Name or Password)")
 	}
 
 	if err := ses.conn.SetReadDeadline(time.Time{}); err != nil { // CONNECT packet timeout cancel
@@ -837,7 +832,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 			}).Debug("SUBSCRIBE received")
 		}
 
-		topics, qoss = append(topics, bytes.Split(topic, []byte{'/'})), append(qoss, p[topicEnd])
+		topics, qoss = append(topics, bytes.Split(topic, []byte{'/'})), append(qoss, p[topicEnd]&3)
 		i += 1 + topicL
 	}
 
@@ -848,7 +843,55 @@ func (s *Server) handleSubscribe(ses *session) error {
 }
 
 func (s *Server) handleSubscribeProperties(ses *session) error {
-	return nil // TODO: store and use Subscribe Properties
+	props := ses.packet.vhBuf[2:]
+	//gotSubId := false
+
+	for i := 0; i < len(props); {
+		remain := len(props) - i
+		switch props[i] {
+		case model.SubscriptionIdentifier:
+			ses.disconnectReasonCode = model.SubscriptionIdsNotSupported
+			return errors.New("malformed SUBSCRIBE: Subscription Identifiers not supported")
+			/*if gotSubId {
+				ses.disconnectReasonCode = model.ProtocolError
+				return errors.New("malformed SUBSCRIBE: Subscription Identifier included more than once")
+			}
+			if remain < 2 {
+				return errors.New("malformed SUBSCRIBE: bad Subscription Identifier")
+			}
+			maxSubId, l, err := variableLengthDecode(props[i+1:])
+			if err != nil {
+				return errors.New("malformed SUBSCRIBE: bad Subscription Identifier")
+			}
+			if maxSubId == 0 {
+				ses.disconnectReasonCode = model.ProtocolError
+				return errors.New("malformed SUBSCRIBE: Subscription Identifier 0 not allowed")
+			}
+
+			gotSubId = true
+			i += 1 + l*/
+		case model.UserProperty:
+			if remain < 5 {
+				return errors.New("malformed SUBSCRIBE: bad User Property")
+			}
+
+			kLen := int(binary.BigEndian.Uint16(props[i+1:]))
+			if remain < 5+kLen {
+				return errors.New("malformed SUBSCRIBE: bad User Property")
+			}
+
+			vLen := int(binary.BigEndian.Uint16(props[i+3+kLen:]))
+			expect := 5 + kLen + vLen
+			if remain < expect {
+				return errors.New("malformed SUBSCRIBE: bad User Property")
+			}
+
+			i += expect
+		default:
+			return fmt.Errorf("malformed SUBSCRIBE: unknown property %d (0x%x)", props[i], props[i])
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleUnsubscribe(ses *session) error {
@@ -981,4 +1024,25 @@ func checkUTF8(str []byte, checkWildCards bool) error {
 		}
 	}
 	return nil
+}
+
+func variableLengthDecode(b []byte) (int, int, error) {
+	l, lMul, i := 0, 1, 0
+	var err error
+
+	for done := false; !done; i++ {
+		if i > len(b)-1 {
+			err = errors.New("bad Variable Length")
+			break
+		}
+
+		l += int(b[i]&127) * lMul
+		if lMul *= 128; lMul > maxVarLenMul {
+			err = errors.New("bad Variable Length")
+			break
+		}
+
+		done = b[i]&128 == 0
+	}
+	return l, i, err
 }

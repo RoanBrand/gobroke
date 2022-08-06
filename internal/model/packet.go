@@ -22,18 +22,21 @@ const (
 
 // Reason Codes
 const (
-	NormalDisconnection        = 0
-	DisconnectWithWill         = 4
-	MalformedPacket            = 129
-	ProtocolError              = 130
-	UnsupportedProtocolVersion = 132
-	ServerShuttingDown         = 139
-	KeepAliveTimeout           = 141
-	SessionTakenOver           = 142
+	NormalDisconnection             = 0
+	DisconnectWithWill              = 4
+	MalformedPacket                 = 129
+	ProtocolError                   = 130
+	UnsupportedProtocolVersion      = 132
+	ServerShuttingDown              = 139
+	KeepAliveTimeout                = 141
+	SessionTakenOver                = 142
+	SharedSubscriptionsNotSupported = 158
+	SubscriptionIdsNotSupported     = 161
 )
 
 // Properties
 const (
+	SubscriptionIdentifier     = 11
 	SessionExpiryInterval      = 17
 	AssignedClientIdentifier   = 18
 	AuthenticationMethod       = 21
