@@ -851,7 +851,7 @@ func (s *Server) handleSubscribeProperties(ses *session) error {
 		switch props[i] {
 		case model.SubscriptionIdentifier:
 			ses.disconnectReasonCode = model.SubscriptionIdsNotSupported
-			return errors.New("malformed SUBSCRIBE: Subscription Identifiers not supported")
+			return errors.New("with SUBSCRIBE: Subscription Identifiers not supported")
 			/*if gotSubId {
 				ses.disconnectReasonCode = model.ProtocolError
 				return errors.New("malformed SUBSCRIBE: Subscription Identifier included more than once")
@@ -927,7 +927,33 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 }
 
 func (s *Server) handleUnSubscribeProperties(ses *session) error {
-	return nil // TODO: store and use Unsubscribe Properties
+	props := ses.packet.vhBuf[2:]
+
+	for i := 0; i < len(props); {
+		remain := len(props) - i
+		switch props[i] {
+		case model.UserProperty:
+			if remain < 5 {
+				return errors.New("malformed UNSUBSCRIBE: bad User Property")
+			}
+
+			kLen := int(binary.BigEndian.Uint16(props[i+1:]))
+			if remain < 5+kLen {
+				return errors.New("malformed UNSUBSCRIBE: bad User Property")
+			}
+
+			vLen := int(binary.BigEndian.Uint16(props[i+3+kLen:]))
+			expect := 5 + kLen + vLen
+			if remain < expect {
+				return errors.New("malformed UNSUBSCRIBE: bad User Property")
+			}
+
+			i += expect
+		default:
+			return fmt.Errorf("malformed UNSUBSCRIBE: unknown property %d (0x%x)", props[i], props[i])
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleDisconnectProperties(ses *session) error {
