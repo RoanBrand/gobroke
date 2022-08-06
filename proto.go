@@ -690,7 +690,7 @@ func (s *Server) handleConnectProperties(ses *session) error {
 			if gotRRI {
 				return errors.New("malformed CONNECT: Request Response Information included more than once")
 			}
-			if remain < 1 {
+			if remain < 2 {
 				return errors.New("malformed CONNECT: bad Request Response Information")
 			}
 			if props[i+1] != 0 && props[i+1] != 1 {
@@ -703,7 +703,7 @@ func (s *Server) handleConnectProperties(ses *session) error {
 			if gotRPI {
 				return errors.New("malformed CONNECT: Request Problem Information included more than once")
 			}
-			if remain < 1 {
+			if remain < 2 {
 				return errors.New("malformed CONNECT: bad Request Problem Information")
 			}
 			if props[i+1] != 0 && props[i+1] != 1 {
@@ -797,7 +797,125 @@ func (s *Server) handlePublish(ses *session) error {
 }
 
 func (s *Server) handlePublishProperties(ses *session) error {
-	return nil // TODO: store and use Publish Properties
+	pStart := 2 + binary.BigEndian.Uint16(ses.packet.vhBuf)
+	if ses.packet.flags&0x06 > 0 { // Qos > 0
+		pStart += 2
+	}
+	props := ses.packet.vhBuf[pStart:]
+	gotTA, gotRT, gotCD, gotCT := false, false, false, false
+
+	for i := 0; i < len(props); {
+		remain := len(props) - i
+		switch props[i] {
+		case model.PayloadFormatIndicator:
+			if remain < 2 {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad Payload Format Indicator")
+			}
+			// TODO: check if payload UTF8 when 1
+			i += 2
+		case model.MessageExpiryInterval:
+			if remain < 5 {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad Message Expiry Interval")
+			}
+			// TODO: message expiry
+			i += 5
+		case model.TopicAlias:
+			if gotTA {
+				ses.disconnectReasonCode = model.ProtocolError
+				return errors.New("malformed PUBLISH: Topic Alias included more than once")
+			}
+			if remain < 3 {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad Topic Alias")
+			}
+			// TODO: set and use Topic Alias
+			gotTA = true
+			i += 3
+		case model.ResponseTopic:
+			if gotRT {
+				ses.disconnectReasonCode = model.ProtocolError
+				return errors.New("malformed PUBLISH: Response Topic included more than once")
+			}
+			if remain < 3 {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad Response Topic")
+			}
+
+			l := int(binary.BigEndian.Uint16(props[i+1:]))
+			if remain < 3+l {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad Response Topic")
+			}
+
+			gotRT = true
+			i += 3 + l
+		case model.CorrelationData:
+			if gotCD {
+				ses.disconnectReasonCode = model.ProtocolError
+				return errors.New("malformed PUBLISH: Response Topic included more than once")
+			}
+			if remain < 3 {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad Response Topic")
+			}
+
+			l := int(binary.BigEndian.Uint16(props[i+1:]))
+			if remain < 3+l {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad Response Topic")
+			}
+
+			gotCD = true
+			i += 3 + l
+		case model.UserProperty:
+			if remain < 5 {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad User Property")
+			}
+
+			kLen := int(binary.BigEndian.Uint16(props[i+1:]))
+			if remain < 5+kLen {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad User Property")
+			}
+
+			vLen := int(binary.BigEndian.Uint16(props[i+3+kLen:]))
+			expect := 5 + kLen + vLen
+			if remain < expect {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad User Property")
+			}
+
+			i += expect
+		case model.SubscriptionIdentifier:
+			ses.disconnectReasonCode = model.ProtocolError // v5[MQTT-3.3.4-6]
+			return errors.New("malformed PUBLISH: Subscription Identifier not allowed from Client")
+		case model.ContentType:
+			if gotCT {
+				ses.disconnectReasonCode = model.ProtocolError
+				return errors.New("malformed PUBLISH: Response Topic included more than once")
+			}
+			if remain < 3 {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad Response Topic")
+			}
+
+			l := int(binary.BigEndian.Uint16(props[i+1:]))
+			if remain < 3+l {
+				ses.disconnectReasonCode = model.MalformedPacket
+				return errors.New("malformed PUBLISH: bad Response Topic")
+			}
+
+			gotCT = true
+			i += 3 + l
+		default:
+			ses.disconnectReasonCode = model.MalformedPacket
+			return fmt.Errorf("malformed PUBLISH: unknown property %d (0x%x)", props[i], props[i])
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleSubscribe(ses *session) error {
@@ -872,22 +990,26 @@ func (s *Server) handleSubscribeProperties(ses *session) error {
 			i += 1 + l*/
 		case model.UserProperty:
 			if remain < 5 {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed SUBSCRIBE: bad User Property")
 			}
 
 			kLen := int(binary.BigEndian.Uint16(props[i+1:]))
 			if remain < 5+kLen {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed SUBSCRIBE: bad User Property")
 			}
 
 			vLen := int(binary.BigEndian.Uint16(props[i+3+kLen:]))
 			expect := 5 + kLen + vLen
 			if remain < expect {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed SUBSCRIBE: bad User Property")
 			}
 
 			i += expect
 		default:
+			ses.disconnectReasonCode = model.MalformedPacket
 			return fmt.Errorf("malformed SUBSCRIBE: unknown property %d (0x%x)", props[i], props[i])
 		}
 	}
@@ -934,22 +1056,26 @@ func (s *Server) handleUnSubscribeProperties(ses *session) error {
 		switch props[i] {
 		case model.UserProperty:
 			if remain < 5 {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed UNSUBSCRIBE: bad User Property")
 			}
 
 			kLen := int(binary.BigEndian.Uint16(props[i+1:]))
 			if remain < 5+kLen {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed UNSUBSCRIBE: bad User Property")
 			}
 
 			vLen := int(binary.BigEndian.Uint16(props[i+3+kLen:]))
 			expect := 5 + kLen + vLen
 			if remain < expect {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed UNSUBSCRIBE: bad User Property")
 			}
 
 			i += expect
 		default:
+			ses.disconnectReasonCode = model.MalformedPacket
 			return fmt.Errorf("malformed UNSUBSCRIBE: unknown property %d (0x%x)", props[i], props[i])
 		}
 	}
@@ -966,9 +1092,11 @@ func (s *Server) handleDisconnectProperties(ses *session) error {
 		switch props[i] {
 		case model.SessionExpiryInterval:
 			if gotSesExp {
+				ses.disconnectReasonCode = model.ProtocolError
 				return errors.New("malformed DISCONNECT: Session Expiry Interval included more than once")
 			}
 			if remain < 5 {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed DISCONNECT: bad Session Expiry Interval")
 			}
 
@@ -983,14 +1111,17 @@ func (s *Server) handleDisconnectProperties(ses *session) error {
 			i += 5
 		case model.ReasonString:
 			if gotReasonStr {
+				ses.disconnectReasonCode = model.ProtocolError
 				return errors.New("malformed DISCONNECT: Reason String included more than once")
 			}
 			if remain < 3 {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed DISCONNECT: bad Reason String")
 			}
 
 			l := int(binary.BigEndian.Uint16(props[i+1:]))
 			if remain < 3+l {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed DISCONNECT: bad Reason String")
 			}
 
@@ -998,24 +1129,29 @@ func (s *Server) handleDisconnectProperties(ses *session) error {
 			i += 3 + l
 		case model.UserProperty:
 			if remain < 5 {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed DISCONNECT: bad User Property")
 			}
 
 			kLen := int(binary.BigEndian.Uint16(props[i+1:]))
 			if remain < 5+kLen {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed DISCONNECT: bad User Property")
 			}
 
 			vLen := int(binary.BigEndian.Uint16(props[i+3+kLen:]))
 			expect := 5 + kLen + vLen
 			if remain < expect {
+				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed DISCONNECT: bad User Property")
 			}
 
 			i += expect
 		case model.ServerReference:
+			ses.disconnectReasonCode = model.ProtocolError
 			return errors.New("malformed DISCONNECT: Server Reference should only be sent by Server")
 		default:
+			ses.disconnectReasonCode = model.MalformedPacket
 			return fmt.Errorf("malformed DISCONNECT: unknown property %d (0x%x)", props[i], props[i])
 		}
 	}
