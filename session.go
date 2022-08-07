@@ -38,6 +38,7 @@ type session struct {
 	expiryInterval uint32
 	maxPacketSize  uint32
 	receiveMax     uint16
+	sendQuota      chan struct{}
 	topicAliasMax  uint16
 	reqProblemInfo bool
 
@@ -180,7 +181,26 @@ func (s *session) handleDisconnect() error {
 }
 
 func (s *session) getPId() uint16 {
+	s.decSendQuota()
 	return <-s.client.pIDs
+}
+
+func (s *session) decSendQuota() {
+	if s.sendQuota != nil {
+		select {
+		case <-s.sendQuota:
+		case <-s.ctx.Done():
+		}
+	}
+}
+
+func (s *session) incSendQuota() {
+	if s.sendQuota != nil {
+		select {
+		case s.sendQuota <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (s *session) updateTimeout() {
@@ -275,6 +295,8 @@ func (s *session) sendPublish(i *queue.Item) error {
 			publish |= 0x08 // set DUP if sent before
 		}
 		i.Sent = time.Now()
+	} else {
+		s.decSendQuota()
 	}
 
 	if s.protoVersion == 5 {
@@ -329,6 +351,7 @@ func (s *session) sendPublish(i *queue.Item) error {
 	s.client.notifyFlusher()
 
 	if qos == 0 {
+		s.incSendQuota()
 		i.P.FreeIfLastUser()
 	}
 

@@ -232,6 +232,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					if p.remainingLength == 0 {
 						c.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
 					}
+					c.session.incSendQuota()
 					if len(p.vhBuf) > 2 && ses.protoVersion == 5 && p.vhBuf[2] != 0 {
 						log.WithFields(log.Fields{
 							"ClientId":    ses.clientId,
@@ -245,6 +246,9 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						}
 					}
 					if len(p.vhBuf) > 2 && ses.protoVersion == 5 && p.vhBuf[2] != 0 {
+						if p.vhBuf[2] >= model.UnspecifiedError {
+							c.session.incSendQuota()
+						}
 						log.WithFields(log.Fields{
 							"ClientId":    ses.clientId,
 							"Reason Code": p.vhBuf[2],
@@ -266,6 +270,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					if p.remainingLength == 0 {
 						c.qos2Part2Done(binary.BigEndian.Uint16(p.vhBuf))
 					}
+					c.session.incSendQuota()
 					if len(p.vhBuf) > 2 && ses.protoVersion == 5 && p.vhBuf[2] != 0 {
 						log.WithFields(log.Fields{
 							"ClientId":    ses.clientId,
@@ -657,6 +662,10 @@ func (s *Server) handleConnectProperties(ses *session) error {
 			ses.receiveMax = binary.BigEndian.Uint16(props[i+1:])
 			if ses.receiveMax == 0 {
 				return errors.New("malformed CONNECT: Receive Maximum 0 not allowed")
+			}
+			ses.sendQuota = make(chan struct{}, ses.receiveMax)
+			for i := 0; i < int(ses.receiveMax); i++ {
+				ses.sendQuota <- struct{}{}
 			}
 
 			gotRxMax = true

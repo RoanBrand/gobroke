@@ -24,6 +24,7 @@ const (
 const (
 	NormalDisconnection             = 0
 	DisconnectWithWill              = 4
+	UnspecifiedError                = 128
 	MalformedPacket                 = 129
 	ProtocolError                   = 130
 	UnsupportedProtocolVersion      = 132
