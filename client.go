@@ -110,7 +110,7 @@ func (c *client) processPub(p *model.PubMessage, subOps uint8, retained bool) {
 }
 
 func (c *client) qos1Done(pID uint16) {
-	i := c.q1.Remove(pID)
+	i := c.q1.RemoveId(pID)
 	if i == nil {
 		log.WithFields(log.Fields{
 			"ClientId": c.session.clientId,
@@ -125,7 +125,7 @@ func (c *client) qos1Done(pID uint16) {
 }
 
 func (c *client) qos2Part1Done(pID uint16) bool {
-	i := c.q2.Remove(pID)
+	i := c.q2.RemoveId(pID)
 	if i == nil {
 		log.WithFields(log.Fields{
 			"ClientId": c.session.clientId,

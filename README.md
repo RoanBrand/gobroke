@@ -90,7 +90,6 @@ s.Run(context.Background())
 	* Response Information
 	* Topic Aliases
 	* Receive Maximum
-	* Max Packet Size
 	* Server Keep Alive
 	* AUTH
 

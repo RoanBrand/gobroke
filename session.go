@@ -279,6 +279,23 @@ func (s *session) sendPublish(i *queue.Item) error {
 
 	if s.protoVersion == 5 {
 		rl++
+
+		// v5[MQTT-3.1.2-24]
+		if max := int(s.maxPacketSize); max != 0 && (rl > max ||
+			1+rl+model.LengthToNumberOfVariableLengthBytes(rl) > max) {
+			i.P.FreeIfLastUser()
+			if qos > 0 {
+				if qos == 1 {
+					s.client.q1.Remove(i)
+				} else {
+					s.client.q2.Remove(i)
+				}
+
+				queue.ReturnItemQos12(i)
+				s.client.pIDs <- i.PId
+			}
+			return nil
+		}
 	}
 
 	s.client.txLock.Lock()

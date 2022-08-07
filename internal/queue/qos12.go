@@ -50,8 +50,8 @@ func (q *QoS2Part2) Add(i *Item) {
 	q.Unlock()
 }
 
-// Remove finalized QoS 1 & 2 messages.
-func (q *QoS12) Remove(id uint16) *Item {
+// RemoveId finalized QoS 1 & 2 messages.
+func (q *QoS12) RemoveId(id uint16) *Item {
 	q.Lock()
 	if i, ok := q.lookup[id]; ok {
 		q.removeDoubly(i)
@@ -61,6 +61,13 @@ func (q *QoS12) Remove(id uint16) *Item {
 	}
 	q.Unlock()
 	return nil
+}
+
+func (q *QoS12) Remove(i *Item) {
+	q.Lock()
+	q.removeDoubly(i)
+	delete(q.lookup, i.PId)
+	q.Unlock()
 }
 
 // Remove PUBREL messages that were finalized.
