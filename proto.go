@@ -321,13 +321,13 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 				//p.payload = p.payload[:0]
 				if p.remainingLength == 0 {
-					ses.updateTimeout()
 					if p.controlType == model.PUBLISH {
 						p.payload = p.payload[:0]
 						if err := s.handlePublish(ses); err != nil {
 							return err
 						}
 					}
+					ses.updateTimeout()
 					ses.rxState = controlAndFlags
 				} else if ses.protoVersion > 4 {
 					p.lenMul = 1
@@ -375,12 +375,21 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				return errors.New("malformed packet: bad Properties Length")
 			}
 
+			p.remainingLength--
 			if rx[i]&128 == 0 {
 				if p.vhPropToRead == 0 {
 					switch p.controlType {
 					case model.PUBLISH:
 						p.payload = p.payload[:0]
-						ses.rxState = payload
+						if p.remainingLength == 0 {
+							if err := s.handlePublish(ses); err != nil {
+								return err
+							}
+							ses.updateTimeout()
+							ses.rxState = controlAndFlags
+						} else {
+							ses.rxState = payload
+						}
 					case model.PUBACK:
 						ses.client.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
 						ses.rxState = controlAndFlags
@@ -408,7 +417,6 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				}
 			}
 
-			p.remainingLength--
 			i++
 		case properties:
 			toRead := p.vhPropToRead
@@ -426,8 +434,17 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					if err := s.handlePublishProperties(ses); err != nil {
 						return err
 					}
+
 					p.payload = p.payload[:0]
-					ses.rxState = payload
+					if p.remainingLength == 0 {
+						if err := s.handlePublish(ses); err != nil {
+							return err
+						}
+						ses.updateTimeout()
+						ses.rxState = controlAndFlags
+					} else {
+						ses.rxState = payload
+					}
 				case model.PUBACK:
 					// TODO: handle PUBACK props
 					ses.client.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
