@@ -82,16 +82,23 @@ func (c *client) notifyFlusher() {
 	}
 }
 
-func (c *client) processPub(p *model.PubMessage, maxQoS uint8, retained bool) {
+func (c *client) processPub(p *model.PubMessage, subOps uint8, retained bool) {
+	if noLocal(subOps) && c.session.clientId == p.Publisher {
+		return // v5[MQTT-3.8.3-3]
+	}
+
 	finalQoS := p.RxQoS()
-	if maxQoS < finalQoS {
-		finalQoS = maxQoS
+	if m := maxQoS(subOps); m < finalQoS {
+		finalQoS = m
 	}
 
 	i := queue.GetItem(p)
 	i.TxQoS, i.Retained = finalQoS, retained
-	p.AddUser()
+	if p.ToRetain() && retainAsPublished(subOps) {
+		i.Retained = true
+	}
 
+	p.AddUser()
 	switch finalQoS {
 	case 0:
 		c.q0.Add(i)

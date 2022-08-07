@@ -14,6 +14,8 @@ type PubMessage struct {
 	// byte 1 to 3+topicLen: topicUTF8
 	// byte 3+topicLen to 3+topicLen+len(payload): payload
 	Pub []byte
+
+	Publisher string
 }
 
 var pool = sync.Pool{}

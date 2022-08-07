@@ -287,9 +287,23 @@ func (s *Server) removeSession(ses *session) {
 	}).Debug("client session removed")
 }
 
+// Subscription Options
+func maxQoS(so uint8) uint8 {
+	return so & 3
+}
+func noLocal(so uint8) bool {
+	return so&4 > 0
+}
+func retainAsPublished(so uint8) bool {
+	return so&8 > 0
+}
+func retainHandling(so uint8) uint8 {
+	return so >> 4
+}
+
 type topicLevel struct {
 	children    topicTree
-	subscribers map[*client]uint8 // client -> QoS level
+	subscribers map[*client]uint8 // client -> Subscription Options
 }
 
 func (tl *topicLevel) init() {
@@ -320,7 +334,7 @@ func (s *Server) removeClientSubscriptions(c *client) {
 }
 
 // Add subscriptions for client. Also check for matching retained messages.
-func (s *Server) addSubscriptions(c *client, topics [][][]byte, qoss []uint8) {
+func (s *Server) addSubscriptions(c *client, topics [][][]byte, subOps []uint8) {
 	s.subLock.Lock()
 	defer s.subLock.Unlock()
 
@@ -348,13 +362,19 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, qoss []uint8) {
 
 			sLev, cLev = sTL.children, cTL.children
 		}
-		sTL.subscribers[c] = qoss[i]
+
+		subDoesExist := cTL.subscribed
+		sTL.subscribers[c] = subOps[i]
 		cTL.subscribed = true
 
 		// Retained messages
+		if rh := retainHandling(subOps[i]); rh == 2 || (rh == 1 && subDoesExist) {
+			continue
+		}
+
 		forwardLevel := func(l *retainLevel) {
 			if l.p != nil {
-				c.processPub(l.p, qoss[i], true)
+				c.processPub(l.p, subOps[i], true)
 			}
 		}
 
@@ -447,8 +467,8 @@ loop:
 }
 
 func (s *Server) forwardToSubscribers(tl *topicLevel, p *model.PubMessage) {
-	for c, maxQoS := range tl.subscribers {
-		c.processPub(p, maxQoS, false)
+	for c, subOp := range tl.subscribers {
+		c.processPub(p, subOp, false)
 	}
 }
 

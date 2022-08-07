@@ -560,6 +560,7 @@ func (s *Server) handleConnect(ses *session) error {
 		}
 
 		ses.will = model.NewPub(willPubFlags, wTopicUTF8, p[offs:offs+wMsgLen])
+		ses.will.Publisher = ses.clientId
 		offs += wMsgLen
 
 	} else if ses.connectFlags&0x38 > 0 { // [MQTT-3.1.2-11, 2-13, 2-15]
@@ -763,6 +764,7 @@ func (s *Server) handlePublish(ses *session) error {
 	p := &ses.packet
 	topicLen := binary.BigEndian.Uint16(p.vhBuf)
 	pub := model.NewPub(p.flags, p.vhBuf[:topicLen+2], p.payload)
+	pub.Publisher = ses.clientId
 
 	if log.IsLevelEnabled(log.DebugLevel) {
 		lf := log.Fields{
@@ -920,21 +922,31 @@ func (s *Server) handlePublishProperties(ses *session) error {
 
 func (s *Server) handleSubscribe(ses *session) error {
 	p := ses.packet.payload
-	topics, qoss := make([][][]byte, 0, 2), make([]uint8, 0, 2)
+	topics, subOps := make([][][]byte, 0, 2), make([]uint8, 0, 2)
 	i := uint32(0)
 
 	for i < uint32(len(p)) {
 		topicL := uint32(binary.BigEndian.Uint16(p[i:]))
 		i += 2
 		topicEnd := i + topicL
+		subOp := p[topicEnd]
 
 		if ses.protoVersion == 5 {
-			if p[topicEnd]&0xC0 != 0 { // v5[MQTT-3.8.3-5]
+			if subOp&0xC0 != 0 { // v5[MQTT-3.8.3-5]
 				return errors.New("malformed SUBSCRIBE: reserved bits in payload must be 0")
 			}
-			// TODO: store and use No Local, Retain As Published & Retain Handling options
-		} else if p[topicEnd]&0xFC != 0 { // [MQTT-3-8.3-4]
+
+			if retainHandling(subOp) > 2 {
+				ses.disconnectReasonCode = model.ProtocolError
+				return errors.New("malformed SUBSCRIBE: Retain Handling 3 not allowed")
+			}
+		} else if subOp&0xFC != 0 { // [MQTT-3-8.3-4]
 			return errors.New("malformed SUBSCRIBE: reserved bits in payload must be 0")
+		}
+
+		if maxQoS(subOp) == 3 {
+			ses.disconnectReasonCode = model.ProtocolError
+			return errors.New("malformed SUBSCRIBE: QoS 3 not allowed")
 		}
 
 		topic := p[i:topicEnd]
@@ -946,18 +958,18 @@ func (s *Server) handleSubscribe(ses *session) error {
 			log.WithFields(log.Fields{
 				"ClientId":     ses.clientId,
 				"Topic Filter": string(topic),
-				"QoS":          p[topicEnd],
+				"QoS":          maxQoS(subOp),
 			}).Debug("SUBSCRIBE received")
 		}
 
-		topics, qoss = append(topics, bytes.Split(topic, []byte{'/'})), append(qoss, p[topicEnd]&3)
+		topics, subOps = append(topics, bytes.Split(topic, []byte{'/'})), append(subOps, subOp)
 		i += 1 + topicL
 	}
 
-	s.addSubscriptions(ses.client, topics, qoss)
+	s.addSubscriptions(ses.client, topics, subOps)
 
 	// [MQTT-3.8.4-1, 4-4, 4-5, 4-6]
-	return ses.sendSuback(qoss)
+	return ses.sendSuback(subOps)
 }
 
 func (s *Server) handleSubscribeProperties(ses *session) error {
