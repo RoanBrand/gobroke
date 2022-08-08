@@ -638,6 +638,9 @@ func (s *Server) handleConnect(ses *session) error {
 	}
 
 	ses.connectSent = true
+	if ses.protoVersion > 4 {
+		ses.taFromClient = make(map[uint16][]byte)
+	}
 	sessionIsPresent := s.addSession(ses)
 	ses.ended.Add(1)
 	go ses.startWriter()
@@ -711,6 +714,11 @@ func (s *Server) handleConnectProperties(ses *session) error {
 			}
 
 			ses.topicAliasMax = binary.BigEndian.Uint16(props[i+1:])
+			if ses.topicAliasMax > 0 {
+				ses.taToClient.aliases = make(map[string]uint16, ses.topicAliasMax)
+				ses.taToClient.left = int32(ses.topicAliasMax)
+			}
+
 			gotTopAlias = true
 			i += 3
 		case model.RequestResponseInformation:
@@ -789,10 +797,35 @@ func (s *Server) handleConnectProperties(ses *session) error {
 func (s *Server) handlePublish(ses *session) error {
 	p := &ses.packet
 	topicLen := binary.BigEndian.Uint16(p.vhBuf)
-	pub := model.NewPub(p.flags, p.vhBuf[:topicLen+2], p.payload)
+	var pub *model.PubMessage
+
+	if p.topicAlias == 0 {
+		if topicLen == 0 { // [MQTT-4.7.3-1]
+			return errors.New("malformed PUBLISH: empty Topic Name")
+		}
+	} else {
+		if topicLen == 0 {
+			lookupTopic, ok := ses.taFromClient[p.topicAlias]
+			if !ok {
+				ses.disconnectReasonCode = model.ProtocolError
+				return errors.New("malformed PUBLISH: unknown Topic Alias")
+			}
+
+			pub = model.NewPub(p.flags, lookupTopic, p.payload)
+		} else {
+			t := make([]byte, len(p.vhBuf[:topicLen+2]))
+			copy(t, p.vhBuf[:topicLen+2])
+			ses.taFromClient[p.topicAlias] = t
+		}
+		p.topicAlias = 0
+	}
+
+	if pub == nil {
+		pub = model.NewPub(p.flags, p.vhBuf[:topicLen+2], p.payload)
+	}
 	pub.Publisher = ses.clientId
 
-	if log.IsLevelEnabled(log.DebugLevel) {
+	/*if log.IsLevelEnabled(log.DebugLevel) {
 		lf := log.Fields{
 			"ClientId":   ses.clientId,
 			"Topic Name": string(p.vhBuf[2 : topicLen+2]),
@@ -805,7 +838,7 @@ func (s *Server) handlePublish(ses *session) error {
 			lf["retain"] = true
 		}
 		log.WithFields(lf).Debug("PUBLISH received")
-	}
+	}*/
 
 	switch pub.RxQoS() {
 	case 0:
@@ -858,7 +891,12 @@ func (s *Server) handlePublishProperties(ses *session) error {
 				ses.disconnectReasonCode = model.MalformedPacket
 				return errors.New("malformed PUBLISH: bad Topic Alias")
 			}
-			// TODO: set and use Topic Alias
+			ses.packet.topicAlias = binary.BigEndian.Uint16(props[i+1:])
+			if ses.packet.topicAlias == 0 {
+				ses.disconnectReasonCode = model.ProtocolError
+				return errors.New("malformed PUBLISH: bad Topic Alias")
+			}
+
 			gotTA = true
 			i += 3
 		case model.ResponseTopic:

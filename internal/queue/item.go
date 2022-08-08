@@ -9,12 +9,12 @@ import (
 
 // Item is stored in various publish message queues.
 type Item struct {
-	P        *model.PubMessage // PUBLISH
-	PId      uint16            // PUBLISH QoS 1&2, PUBREL
-	TxQoS    uint8             // PUBLISH
-	Retained bool              // PUBLISH. Msg sent by server due to client subscription to topic with retained message
+	P          *model.PubMessage
+	PId        uint16 // QoS 1&2, PUBREL
+	TxQoS      uint8
+	Retained   bool // Msg sent to client due to subscription
 
-	Sent time.Time // PUBLISH QoS 1&2, PUBREL
+	Sent time.Time // QoS 1&2, PUBREL
 
 	next, prev *Item
 }

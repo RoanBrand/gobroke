@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/RoanBrand/gobroke/internal/model"
@@ -45,6 +46,9 @@ type session struct {
 	will     *model.PubMessage
 	userName string
 	password []byte
+
+	taToClient   topicAliasesClient
+	taFromClient map[uint16][]byte
 }
 
 type packet struct {
@@ -58,8 +62,15 @@ type packet struct {
 	vhPropToRead uint32
 	vhBuf        []byte
 	pID          uint16 // subscribe, unsubscribe, publish with QoS>0.
+	topicAlias   uint16 // PUBLISH
 
 	payload []byte // sometimes used as temp buf for tx from reader thread
+}
+
+type topicAliasesClient struct {
+	left    int32
+	aliases map[string]uint16
+	lock    sync.RWMutex
 }
 
 func (s *session) run() {
@@ -210,8 +221,9 @@ func (s *session) updateTimeout() {
 }
 
 var connackProps = []byte{
-	41, 0, // Sub Ids not supported yet
-	42, 0, // Shared subs not supported yet
+	model.TopicAliasMaximum, 0xFF, 0xFF, // support max value Topic Alias Maximum
+	model.SubscriptionIdentifiersAvailable, 0, // not supported yet
+	model.SharedSubscriptionsAvailable, 0, // not supported yet
 }
 
 // Send CONNACK with success 0.
@@ -299,10 +311,46 @@ func (s *session) sendPublish(i *queue.Item) error {
 		s.decSendQuota()
 	}
 
+	tLen := binary.BigEndian.Uint16(i.P.Pub[1:])
+	topicUTF8 := i.P.Pub[1 : 3+tLen]
+	var tAlias uint16
+	haveTAlias, newTAlias := false, false
+
 	if s.protoVersion == 5 {
 		rl++
 
-		// v5[MQTT-3.1.2-24]
+		// Topic Alias
+		if !i.Retained {
+			// save Topic Aliases for non-retained msgs
+			t := topicUTF8[2:]
+			tStrRead := bytesToStringUnsafe(t)
+
+			s.taToClient.lock.RLock()
+			tAlias, haveTAlias = s.taToClient.aliases[tStrRead]
+			s.taToClient.lock.RUnlock()
+
+			if !haveTAlias && atomic.LoadInt32(&s.taToClient.left) > 0 {
+				s.taToClient.lock.Lock()
+				tAlias, haveTAlias = s.taToClient.aliases[tStrRead]
+				if !haveTAlias {
+					newLeft := atomic.AddInt32(&s.taToClient.left, -1)
+					if newLeft >= 0 {
+						tAlias = s.topicAliasMax - uint16(newLeft)
+						s.taToClient.aliases[string(t)] = tAlias
+						haveTAlias, newTAlias = true, true
+					}
+				}
+				s.taToClient.lock.Unlock()
+			}
+			if haveTAlias {
+				rl += 3
+				if !newTAlias {
+					rl -= len(t)
+				}
+			}
+		}
+
+		// Too large, discard. v5[MQTT-3.1.2-24]
 		if max := int(s.maxPacketSize); max != 0 && (rl > max ||
 			1+rl+model.LengthToNumberOfVariableLengthBytes(rl) > max) {
 			i.P.FreeIfLastUser()
@@ -321,16 +369,19 @@ func (s *session) sendPublish(i *queue.Item) error {
 	}
 
 	s.client.txLock.Lock()
-
 	s.client.tx.WriteByte(publish)
 
 	model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
 		return s.client.tx.WriteByte(eb)
 	})
 
-	tLen := binary.BigEndian.Uint16(i.P.Pub[1:])
 	// Topic Name
-	s.client.tx.Write(i.P.Pub[1 : 3+tLen])
+	if !haveTAlias || newTAlias {
+		s.client.tx.Write(topicUTF8)
+	} else {
+		s.client.tx.WriteByte(0)
+		s.client.tx.WriteByte(0)
+	}
 
 	// PId
 	if qos > 0 {
@@ -341,7 +392,14 @@ func (s *session) sendPublish(i *queue.Item) error {
 	// Properties
 	if s.protoVersion == 5 {
 		// TODO: support outgoing properties
-		s.client.tx.WriteByte(0)
+		if haveTAlias {
+			s.client.tx.WriteByte(3)
+			s.client.tx.WriteByte(model.TopicAlias)
+			s.client.tx.WriteByte(byte(tAlias >> 8))
+			s.client.tx.WriteByte(byte(tAlias))
+		} else {
+			s.client.tx.WriteByte(0)
+		}
 	}
 
 	// Payload

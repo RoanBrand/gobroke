@@ -88,8 +88,6 @@ s.Run(context.Background())
 	* Shared Subscriptions
 	* Request/Response
 	* Response Information
-	* Topic Aliases
-	* Receive Maximum
 	* Server Keep Alive
 	* AUTH
 
