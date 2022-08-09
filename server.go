@@ -506,8 +506,8 @@ func (s *Server) matchTopicLevel(p *model.PubMessage, l topicTree, ln int) {
 // Match published message topic to all subscribers, and forward.
 // Also store pub if retained message.
 func (s *Server) matchSubscriptions(p *model.PubMessage) {
-	tLen := binary.BigEndian.Uint16(p.Pub[1:])
-	s.splitPubTopic(p.Pub[3 : 3+tLen])
+	tLen := binary.BigEndian.Uint16(p.B[1:])
+	s.splitPubTopic(p.B[3 : 3+tLen])
 
 	s.subLock.RLock()
 	s.matchTopicLevel(p, s.subscriptions, 0)
@@ -532,7 +532,7 @@ func (s *Server) matchSubscriptions(p *model.PubMessage) {
 
 	oldRetained := nl.p
 
-	if len(p.Pub) == 3+int(tLen) {
+	if len(p.B) == 3+int(tLen) {
 		// payload empty, so delete existing retained message
 		nl.p = nil
 		s.subLock.RUnlock()

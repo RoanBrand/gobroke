@@ -86,7 +86,6 @@ s.Run(context.Background())
 * MQTT 5:
 	* Subscription Ids
 	* Shared Subscriptions
-	* Request/Response
 	* Response Information
 	* Server Keep Alive
 	* AUTH

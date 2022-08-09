@@ -431,10 +431,6 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			if p.vhPropToRead == 0 {
 				switch p.controlType {
 				case model.PUBLISH:
-					if err := s.handlePublishProperties(ses); err != nil {
-						return err
-					}
-
 					p.payload = p.payload[:0]
 					if p.remainingLength == 0 {
 						if err := s.handlePublish(ses); err != nil {
@@ -581,7 +577,7 @@ func (s *Server) handleConnect(ses *session) error {
 			willPubFlags |= 0x01 // retain
 		}
 
-		ses.will = model.NewPub(willPubFlags, wTopicUTF8, p[offs:offs+wMsgLen])
+		ses.will = model.NewPubOld(willPubFlags, wTopicUTF8, p[offs:offs+wMsgLen])
 		ses.will.Publisher = ses.clientId
 		offs += wMsgLen
 
@@ -796,33 +792,58 @@ func (s *Server) handleConnectProperties(ses *session) error {
 
 func (s *Server) handlePublish(ses *session) error {
 	p := &ses.packet
-	topicLen := binary.BigEndian.Uint16(p.vhBuf)
-	var pub *model.PubMessage
+	topicLen := int(binary.BigEndian.Uint16(p.vhBuf))
+	var topicUTF8 []byte
 
-	if p.topicAlias == 0 {
-		if topicLen == 0 { // [MQTT-4.7.3-1]
+	// Topic Alias
+	if topicLen == 0 {
+		if p.topicAlias == 0 { // [MQTT-4.7.3-1]
 			return errors.New("malformed PUBLISH: empty Topic Name")
-		}
-	} else {
-		if topicLen == 0 {
-			lookupTopic, ok := ses.taFromClient[p.topicAlias]
+		} else {
+			var ok bool
+			topicUTF8, ok = ses.taFromClient[p.topicAlias]
 			if !ok {
 				ses.disconnectReasonCode = model.ProtocolError
 				return errors.New("malformed PUBLISH: unknown Topic Alias")
 			}
-
-			pub = model.NewPub(p.flags, lookupTopic, p.payload)
-		} else {
-			t := make([]byte, len(p.vhBuf[:topicLen+2]))
-			copy(t, p.vhBuf[:topicLen+2])
-			ses.taFromClient[p.topicAlias] = t
+			p.topicAlias = 0
 		}
-		p.topicAlias = 0
+	} else {
+		topicUTF8 = p.vhBuf[:topicLen+2]
+		if p.topicAlias != 0 {
+			t := make([]byte, len(topicUTF8))
+			copy(t, topicUTF8)
+			ses.taFromClient[p.topicAlias] = t
+			p.topicAlias = 0
+		}
 	}
 
-	if pub == nil {
-		pub = model.NewPub(p.flags, p.vhBuf[:topicLen+2], p.payload)
+	requiredLen := 1 + len(topicUTF8) + len(p.payload)
+	pub := model.NewPub(requiredLen)
+
+	pub.B[0] = p.flags
+	pub.B = append(pub.B, topicUTF8...)
+	pub.B = append(pub.B, p.payload...)
+
+	propsIdx := 2 + topicLen
+	if p.flags&0x06 > 0 { // Qos > 0
+		propsIdx += 2
 	}
+	props := p.vhBuf[propsIdx:]
+	if len(props) > 0 {
+		if cap(pub.Props) < len(props) {
+			pub.Props = make([]byte, 0, len(props))
+		} else {
+			pub.Props = pub.Props[:0]
+		}
+
+		var err error
+		pub.Props, err = ses.handlePublishProperties(pub.Props, props)
+		if err != nil {
+			return err
+		}
+	}
+
 	pub.Publisher = ses.clientId
 
 	/*if log.IsLevelEnabled(log.DebugLevel) {
@@ -857,131 +878,127 @@ func (s *Server) handlePublish(ses *session) error {
 	return nil
 }
 
-func (s *Server) handlePublishProperties(ses *session) error {
-	pStart := 2 + binary.BigEndian.Uint16(ses.packet.vhBuf)
-	if ses.packet.flags&0x06 > 0 { // Qos > 0
-		pStart += 2
-	}
-	props := ses.packet.vhBuf[pStart:]
+func (s *session) handlePublishProperties(tx, rx []byte) ([]byte, error) {
 	gotTA, gotRT, gotCD, gotCT := false, false, false, false
 
-	for i := 0; i < len(props); {
-		remain := len(props) - i
-		switch props[i] {
+	for i := 0; i < len(rx); {
+		remain := len(rx) - i
+		switch rx[i] {
 		case model.PayloadFormatIndicator:
 			if remain < 2 {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad Payload Format Indicator")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad Payload Format Indicator")
 			}
-			// TODO: check if payload UTF8 when 1
+			if rx[i+1] == 1 {
+				if err := checkUTF8(s.packet.payload, false); err != nil {
+					s.disconnectReasonCode = model.PayloadFormatInvalid
+					return nil, errors.New("malformed PUBLISH: payload not valid UTF8")
+				}
+			}
+			tx = append(tx, rx[i:i+2]...)
 			i += 2
 		case model.MessageExpiryInterval:
 			if remain < 5 {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad Message Expiry Interval")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad Message Expiry Interval")
 			}
 			// TODO: message expiry
+			tx = append(tx, rx[i:i+5]...)
 			i += 5
 		case model.TopicAlias:
 			if gotTA {
-				ses.disconnectReasonCode = model.ProtocolError
-				return errors.New("malformed PUBLISH: Topic Alias included more than once")
+				s.disconnectReasonCode = model.ProtocolError
+				return nil, errors.New("malformed PUBLISH: Topic Alias included more than once")
 			}
 			if remain < 3 {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad Topic Alias")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad Topic Alias")
 			}
-			ses.packet.topicAlias = binary.BigEndian.Uint16(props[i+1:])
-			if ses.packet.topicAlias == 0 {
-				ses.disconnectReasonCode = model.ProtocolError
-				return errors.New("malformed PUBLISH: bad Topic Alias")
+			s.packet.topicAlias = binary.BigEndian.Uint16(rx[i+1:])
+			if s.packet.topicAlias == 0 {
+				s.disconnectReasonCode = model.ProtocolError
+				return nil, errors.New("malformed PUBLISH: bad Topic Alias")
 			}
-
 			gotTA = true
 			i += 3
 		case model.ResponseTopic:
 			if gotRT {
-				ses.disconnectReasonCode = model.ProtocolError
-				return errors.New("malformed PUBLISH: Response Topic included more than once")
+				s.disconnectReasonCode = model.ProtocolError
+				return nil, errors.New("malformed PUBLISH: Response Topic included more than once")
 			}
 			if remain < 3 {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad Response Topic")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad Response Topic")
 			}
-
-			l := int(binary.BigEndian.Uint16(props[i+1:]))
+			l := int(binary.BigEndian.Uint16(rx[i+1:]))
 			if remain < 3+l {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad Response Topic")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad Response Topic")
 			}
-
+			tx = append(tx, rx[i:i+3+l]...)
 			gotRT = true
 			i += 3 + l
 		case model.CorrelationData:
 			if gotCD {
-				ses.disconnectReasonCode = model.ProtocolError
-				return errors.New("malformed PUBLISH: Response Topic included more than once")
+				s.disconnectReasonCode = model.ProtocolError
+				return nil, errors.New("malformed PUBLISH: Response Topic included more than once")
 			}
 			if remain < 3 {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad Response Topic")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad Response Topic")
 			}
-
-			l := int(binary.BigEndian.Uint16(props[i+1:]))
+			l := int(binary.BigEndian.Uint16(rx[i+1:]))
 			if remain < 3+l {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad Response Topic")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad Response Topic")
 			}
-
+			tx = append(tx, rx[i:i+3+l]...)
 			gotCD = true
 			i += 3 + l
 		case model.UserProperty:
 			if remain < 5 {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad User Property")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad User Property")
 			}
-
-			kLen := int(binary.BigEndian.Uint16(props[i+1:]))
+			kLen := int(binary.BigEndian.Uint16(rx[i+1:]))
 			if remain < 5+kLen {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad User Property")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad User Property")
 			}
-
-			vLen := int(binary.BigEndian.Uint16(props[i+3+kLen:]))
+			vLen := int(binary.BigEndian.Uint16(rx[i+3+kLen:]))
 			expect := 5 + kLen + vLen
 			if remain < expect {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad User Property")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad User Property")
 			}
-
+			tx = append(tx, rx[i:i+expect]...)
 			i += expect
 		case model.SubscriptionIdentifier:
-			ses.disconnectReasonCode = model.ProtocolError // v5[MQTT-3.3.4-6]
-			return errors.New("malformed PUBLISH: Subscription Identifier not allowed from Client")
+			s.disconnectReasonCode = model.ProtocolError // v5[MQTT-3.3.4-6]
+			return nil, errors.New("malformed PUBLISH: Subscription Identifier not allowed from Client")
 		case model.ContentType:
 			if gotCT {
-				ses.disconnectReasonCode = model.ProtocolError
-				return errors.New("malformed PUBLISH: Response Topic included more than once")
+				s.disconnectReasonCode = model.ProtocolError
+				return nil, errors.New("malformed PUBLISH: Response Topic included more than once")
 			}
 			if remain < 3 {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad Response Topic")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad Response Topic")
 			}
-
-			l := int(binary.BigEndian.Uint16(props[i+1:]))
+			l := int(binary.BigEndian.Uint16(rx[i+1:]))
 			if remain < 3+l {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed PUBLISH: bad Response Topic")
+				s.disconnectReasonCode = model.MalformedPacket
+				return nil, errors.New("malformed PUBLISH: bad Response Topic")
 			}
-
+			tx = append(tx, rx[i:i+3+l]...)
 			gotCT = true
 			i += 3 + l
 		default:
-			ses.disconnectReasonCode = model.MalformedPacket
-			return fmt.Errorf("malformed PUBLISH: unknown property %d (0x%x)", props[i], props[i])
+			s.disconnectReasonCode = model.MalformedPacket
+			return nil, fmt.Errorf("malformed PUBLISH: unknown property %d (0x%x)", rx[i], rx[i])
 		}
 	}
-	return nil
+	return tx, nil
 }
 
 func (s *Server) handleSubscribe(ses *session) error {

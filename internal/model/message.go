@@ -11,27 +11,45 @@ type PubMessage struct {
 
 	// flags + topicUTF8 + payload
 	// byte 0: publish flags, i.e. DUP, QoS, Retain
-	// byte 1 to 3+topicLen: topicUTF8
-	// byte 3+topicLen to 3+topicLen+len(payload): payload
-	Pub []byte
+	// byte 1: topicUTF8
+	// byte 3+topicLen: payload
+	B []byte
+
+	Props []byte
 
 	Publisher string
 }
 
 var pool = sync.Pool{}
 
-func NewPub(flags uint8, topicUTF8, payload []byte) (p *PubMessage) {
+func NewPub(requiredBLen int) (p *PubMessage) {
 	if pi := pool.Get(); pi == nil {
-		p = &PubMessage{Pub: make([]byte, 1, 1+len(topicUTF8)+len(payload))}
+		p = &PubMessage{B: make([]byte, 1, requiredBLen)}
 	} else {
 		p = pi.(*PubMessage)
-		p.Pub = p.Pub[:1]
+		if cap(p.B) < requiredBLen {
+			p.B = make([]byte, 1, requiredBLen)
+		} else {
+			p.B = p.B[:1]
+		}
 	}
 
 	p.refs = 1
-	p.Pub[0] = flags
-	p.Pub = append(p.Pub, topicUTF8...)
-	p.Pub = append(p.Pub, payload...)
+	return p
+}
+
+func NewPubOld(flags uint8, topicUTF8, payload []byte) (p *PubMessage) {
+	if pi := pool.Get(); pi == nil {
+		p = &PubMessage{B: make([]byte, 1, 1+len(topicUTF8)+len(payload))}
+	} else {
+		p = pi.(*PubMessage)
+		p.B = p.B[:1]
+	}
+
+	p.refs = 1
+	p.B[0] = flags
+	p.B = append(p.B, topicUTF8...)
+	p.B = append(p.B, payload...)
 	return p
 }
 
@@ -48,13 +66,13 @@ func (p *PubMessage) FreeIfLastUser() {
 }
 
 func (p *PubMessage) Duplicate() bool {
-	return p.Pub[0]&0x08 > 0 // msg received by server is DUP
+	return p.B[0]&0x08 > 0 // msg received by server is DUP
 }
 
 func (p *PubMessage) RxQoS() uint8 {
-	return (p.Pub[0] & 0x06) >> 1 // qos of received msg
+	return (p.B[0] & 0x06) >> 1 // qos of received msg
 }
 
 func (p *PubMessage) ToRetain() bool {
-	return p.Pub[0]&0x01 > 0 // msg received by server to be retained
+	return p.B[0]&0x01 > 0 // msg received by server to be retained
 }

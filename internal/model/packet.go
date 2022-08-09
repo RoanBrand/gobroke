@@ -31,6 +31,7 @@ const (
 	ServerShuttingDown              = 139
 	KeepAliveTimeout                = 141
 	SessionTakenOver                = 142
+	PayloadFormatInvalid            = 153
 	SharedSubscriptionsNotSupported = 158
 	SubscriptionIdsNotSupported     = 161
 )

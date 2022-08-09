@@ -297,7 +297,7 @@ func (s *session) sendPublish(i *queue.Item) error {
 		publish |= 0x01
 	}
 
-	rl := len(i.P.Pub) - 1
+	rl := len(i.P.B) - 1
 	qos := i.TxQoS
 	if qos > 0 {
 		rl += 2
@@ -311,16 +311,15 @@ func (s *session) sendPublish(i *queue.Item) error {
 		s.decSendQuota()
 	}
 
-	tLen := binary.BigEndian.Uint16(i.P.Pub[1:])
-	topicUTF8 := i.P.Pub[1 : 3+tLen]
+	tLen := binary.BigEndian.Uint16(i.P.B[1:])
+	topicUTF8 := i.P.B[1 : 3+tLen]
 	var tAlias uint16
 	haveTAlias, newTAlias := false, false
+	pl := 0
 
 	if s.protoVersion == 5 {
-		rl++
-
 		// Topic Alias
-		if !i.Retained {
+		if s.topicAliasMax > 0 && !i.Retained {
 			// save Topic Aliases for non-retained msgs
 			t := topicUTF8[2:]
 			tStrRead := bytesToStringUnsafe(t)
@@ -342,13 +341,18 @@ func (s *session) sendPublish(i *queue.Item) error {
 				}
 				s.taToClient.lock.Unlock()
 			}
-			if haveTAlias {
-				rl += 3
-				if !newTAlias {
-					rl -= len(t)
-				}
+			if haveTAlias && !newTAlias {
+				rl -= len(t)
 			}
 		}
+
+		// Properties Length
+		pl = len(i.P.Props)
+		if haveTAlias {
+			pl += 3
+		}
+
+		rl += pl + model.LengthToNumberOfVariableLengthBytes(pl)
 
 		// Too large, discard. v5[MQTT-3.1.2-24]
 		if max := int(s.maxPacketSize); max != 0 && (rl > max ||
@@ -391,19 +395,21 @@ func (s *session) sendPublish(i *queue.Item) error {
 
 	// Properties
 	if s.protoVersion == 5 {
-		// TODO: support outgoing properties
+		model.VariableLengthEncodeNoAlloc(pl, func(eb byte) error {
+			return s.client.tx.WriteByte(eb)
+		})
+
 		if haveTAlias {
-			s.client.tx.WriteByte(3)
 			s.client.tx.WriteByte(model.TopicAlias)
 			s.client.tx.WriteByte(byte(tAlias >> 8))
 			s.client.tx.WriteByte(byte(tAlias))
-		} else {
-			s.client.tx.WriteByte(0)
 		}
+
+		s.client.tx.Write(i.P.Props)
 	}
 
 	// Payload
-	_, err := s.client.tx.Write(i.P.Pub[3+tLen:])
+	_, err := s.client.tx.Write(i.P.B[3+tLen:])
 
 	s.client.txLock.Unlock()
 	s.client.notifyFlusher()
