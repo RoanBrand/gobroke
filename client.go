@@ -135,7 +135,7 @@ func (c *client) qos2Part1Done(pID uint16) bool {
 	}
 
 	i.P.FreeIfLastUser()
-	i.P, i.Sent = nil, time.Now()
+	i.P, i.Sent = nil, uint32(time.Now().Unix())
 	c.q2Stage2.Add(i)
 	return true
 }

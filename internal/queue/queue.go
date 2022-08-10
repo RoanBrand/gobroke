@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -134,10 +135,11 @@ func (q *queue) monitorTimeouts(ctx context.Context, toMS uint64, timedOut func(
 
 			q.Lock()
 			for i := q.h; i != nil; i = i.next {
-				if i.Sent.IsZero() {
+				sent := int64(atomic.LoadUint32(&i.Sent))
+				if sent == 0 {
 					break // if we encounter unsent, stop
 				}
-				if pending := now.Sub(i.Sent); pending < timeout {
+				if pending := now.Sub(time.Unix(sent, 0)); pending < timeout {
 					if candidate := timeout - pending; candidate < nextRun {
 						nextRun = candidate
 					}

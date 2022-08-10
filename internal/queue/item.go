@@ -2,19 +2,20 @@ package queue
 
 import (
 	"sync"
-	"time"
 
 	"github.com/RoanBrand/gobroke/internal/model"
 )
 
 // Item is stored in various publish message queues.
 type Item struct {
-	P          *model.PubMessage
-	PId        uint16 // QoS 1&2, PUBREL
-	TxQoS      uint8
-	Retained   bool // Msg sent to client due to subscription
+	P *model.PubMessage
 
-	Sent time.Time // QoS 1&2, PUBREL
+	// up to 7Feb2106 with time.Now().Unix()
+	Sent uint32 // QoS 1&2, PUBREL
+
+	PId      uint16 // QoS 1&2, PUBREL
+	TxQoS    uint8
+	Retained bool // Msg sent to client due to subscription
 
 	next, prev *Item
 }
@@ -38,6 +39,6 @@ func ReturnItem(i *Item) {
 }
 
 func ReturnItemQos12(i *Item) {
-	i.PId, i.Sent = 0, time.Time{}
+	i.PId, i.Sent = 0, 0
 	ReturnItem(i)
 }

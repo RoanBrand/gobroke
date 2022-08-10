@@ -303,10 +303,10 @@ func (s *session) sendPublish(i *queue.Item) error {
 		rl += 2
 		publish |= qos << 1
 
-		if !i.Sent.IsZero() {
+		if atomic.LoadUint32(&i.Sent) != 0 {
 			publish |= 0x08 // set DUP if sent before
 		}
-		i.Sent = time.Now()
+		atomic.StoreUint32(&i.Sent, uint32(time.Now().Unix()))
 	} else {
 		s.decSendQuota()
 	}
@@ -445,7 +445,7 @@ func (s *session) sendPubrel(pId uint16, dupV3 bool) error {
 
 func (s *session) sendPubrelFromQueue(i *queue.Item) error {
 	var header byte = model.PUBRELSend
-	if s.protoVersion == 3 && !i.Sent.IsZero() {
+	if s.protoVersion == 3 && i.Sent != 0 {
 		header |= 0x08 // set mqtt3 DUP
 	}
 
@@ -459,7 +459,7 @@ func (s *session) sendPubrelFromQueue(i *queue.Item) error {
 	s.client.txLock.Unlock()
 	s.client.notifyFlusher()
 
-	i.Sent = time.Now()
+	i.Sent = uint32(time.Now().Unix())
 	return err
 }
 
