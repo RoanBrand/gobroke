@@ -1,7 +1,6 @@
 package tests_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -14,16 +13,16 @@ func TestService(t *testing.T) {
 	s := gobroke.Server{}
 
 	t.Cleanup(func() {
-		s.Stop()
+		s.Shutdown()
 	})
 
 	errs := make(chan error, 1)
 	go func() {
-		if err := s.Run(context.Background()); err != nil {
+		if err := s.Run(); err != nil {
 			errs <- err
 		}
 	}()
-	time.Sleep(time.Microsecond)
+	time.Sleep(time.Millisecond)
 
 	t.Run("cleansession and sessionpresent", testRejoin)
 	t.Run("new clients", testRejoin2)

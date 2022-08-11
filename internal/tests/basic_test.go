@@ -37,7 +37,7 @@ func testRejoin(t *testing.T) {
 		errs <- fmt.Errorf("topic: %s msg: %s, pID: %d, qos: %d, dup %v", pTopic, pMsg, pID, qos, dup)
 	}
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 8; i++ {
 		c1, err := dial(c1Name, false, sp1, errs)
 		if err != nil {
 			t.Fatal(err)
@@ -129,11 +129,11 @@ func testRejoin(t *testing.T) {
 	}
 
 	// session present must be 0 if cleansession is set.
-	_, err := dial(c1Name, true, 0, errs)
+	finalC1, err := dial(c1Name, true, 0, errs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = dial(c2Name, true, 0, errs)
+	finalC2, err := dial(c2Name, true, 0, errs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,4 +143,9 @@ func testRejoin(t *testing.T) {
 		t.Fatal(err)
 	default:
 	}
+
+	oldC1.stop(false)
+	oldC2.stop(false)
+	finalC1.stop(false)
+	finalC2.stop(false)
 }

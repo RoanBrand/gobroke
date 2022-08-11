@@ -11,13 +11,13 @@ go get github.com/RoanBrand/gobroke
 import "github.com/RoanBrand/gobroke"
 
 s := gobroke.Server{}
-err := s.Run(context.Background())
+err := s.Run()
 if err != nil {
 	panic(err)
 }
 ```
-* `s.Run()` starts a MQTT broker listening on TCP port 1883.
-* It blocks while service is running until `s.Stop()` is called, or provided context is cancelled.
+* `Run()` starts a MQTT broker listening on TCP port 1883.
+* It blocks while service is running until `Close()` or `Shutdown()` is called.
 * Will return `nil` if successfully shut down, or provide an error otherwise.
 
 ## Extended Configuration
@@ -29,7 +29,7 @@ s.TLS.Cert = "certs/example.crt"
 s.TLS.Key = "certs/example.key"
 s.WS.Address = ":8080"
 
-s.Run(context.Background())
+s.Run()
 ```
 * You can configure network protocols TCP, TLS, Websocket, and Secure Websocket (WSS).
 * Setting the `Address` field to `""` disables the network protocol and listener.

@@ -303,7 +303,7 @@ func (s *session) sendPublish(i *queue.Item) error {
 		rl += 2
 		publish |= qos << 1
 
-		if atomic.LoadUint32(&i.Sent) != 0 {
+		if i.Sent != 0 {
 			publish |= 0x08 // set DUP if sent before
 		}
 		atomic.StoreUint32(&i.Sent, uint32(time.Now().Unix()))

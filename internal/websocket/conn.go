@@ -50,7 +50,7 @@ func (ws *WS) Stop() error {
 	defer cancel()
 
 	err := ws.h.Shutdown(ctx)
-	if err != nil && err != http.ErrServerClosed {
+	if err != nil {
 		return err
 	}
 

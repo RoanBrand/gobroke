@@ -17,14 +17,16 @@ func testRejoin2(t *testing.T) {
 	cID := uuid.NewString()
 	var expectOldSession uint8 = 0
 
-	for i := 0; i < 50; i++ {
+	c := newClient(cID, errs)
+	var err error
+
+	for i := 0; i < 32; i++ {
 		dialCleanSession := rand.Intn(2) == 0
 		if dialCleanSession {
 			expectOldSession = 0
 		}
 
-		_, err := dial(cID, dialCleanSession, expectOldSession, errs)
-		if err != nil {
+		if err = c.connect(dialCleanSession, expectOldSession); err != nil {
 			t.Fatal(err)
 		}
 
@@ -33,11 +35,17 @@ func testRejoin2(t *testing.T) {
 		} else {
 			expectOldSession = 1
 		}
+
+		if err = c.stop(false); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
 func testConnect(t *testing.T) {
 	t.Parallel()
+
+	tooLong := time.NewTimer(time.Second * 5)
 
 	errs := make(chan error, 1)
 	c := newClient("", errs)
@@ -58,7 +66,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal("server did not close connection:", protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -80,7 +88,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -103,7 +111,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.dead:
 		t.Fatal("no connack received:", protoErr)
@@ -119,7 +127,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -143,7 +151,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.dead:
 		t.Fatal("no connack received:", protoErr)
@@ -159,7 +167,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -184,7 +192,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -211,7 +219,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -240,7 +248,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -272,7 +280,7 @@ func testConnect(t *testing.T) {
 		t.Fatal(err)
 	case <-c.dead:
 		t.Fatal(protoErr)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case connackInfo := <-c.connacks:
 		if connackInfo.code != 0 {
@@ -300,7 +308,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		// If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00) [MQTT-3.1.2-13].
 		t.Fatal(protoErr)
 	case <-c.connacks:
@@ -326,7 +334,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		// If the Will Flag is set to 0, then the Will QoS MUST be set to 0 (0x00) [MQTT-3.1.2-13].
 		t.Fatal(protoErr)
 	case <-c.connacks:
@@ -352,7 +360,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr) // If the Will Flag is set to 0, then the Will Retain Flag MUST be set to 0 [MQTT-3.1.2-15].
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -379,7 +387,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -405,7 +413,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -437,7 +445,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -463,7 +471,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -491,7 +499,7 @@ func testConnect(t *testing.T) {
 		t.Fatal(err)
 	case <-c.dead:
 		t.Fatal(protoErr)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case connackInfo := <-c.connacks:
 		if connackInfo.code != 0 {
@@ -524,7 +532,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -552,7 +560,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -582,7 +590,7 @@ func testConnect(t *testing.T) {
 		t.Fatal(err)
 	case <-c.dead:
 		t.Fatal(protoErr)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case connackInfo := <-c.connacks:
 		if connackInfo.code != 0 {
@@ -611,7 +619,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -636,7 +644,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
@@ -665,7 +673,7 @@ func testConnect(t *testing.T) {
 		t.Fatal(err)
 	case <-c.dead:
 		t.Fatal(protoErr)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case connackInfo := <-c.connacks:
 		if connackInfo.code != 0 {
@@ -689,7 +697,7 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.dead:
 		t.Fatal("no connack received:", protoErr)
@@ -705,10 +713,12 @@ func testConnect(t *testing.T) {
 	select {
 	case err := <-errs:
 		t.Fatal(err)
-	case <-time.After(time.Millisecond * 500):
+	case <-tooLong.C:
 		t.Fatal(protoErr)
 	case <-c.connacks:
 		t.Fatal(protoErr)
 	case <-c.dead:
 	}
+
+	c.stop(false)
 }

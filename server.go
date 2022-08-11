@@ -39,15 +39,12 @@ type Server struct {
 	sepPubTopic [][]byte
 }
 
-func (s *Server) Run(ctx context.Context) error {
+func (s *Server) Run() error {
 	if s.TCP.Address == "" && s.TLS.Address == "" && s.WS.Address == "" && s.WSS.Address == "" {
 		s.TCP.Address = ":1883" // default to basic TCP only server if nothing specified.
 	}
 
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	s.ctx, s.cancel = context.WithCancel(ctx)
+	s.ctx, s.cancel = context.WithCancel(context.Background())
 	defer s.cancel()
 
 	s.clients = make(map[string]*client)
@@ -95,7 +92,12 @@ func (s *Server) Run(ctx context.Context) error {
 	return err
 }
 
-func (s *Server) Stop() {
+func (s *Server) Close() error {
+	s.Shutdown()
+	return nil
+}
+
+func (s *Server) Shutdown() {
 	log.Info("Shutting down MQTT server")
 
 	if s.tcpL != nil {

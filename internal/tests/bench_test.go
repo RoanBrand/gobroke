@@ -1,7 +1,6 @@
 package tests_test
 
 import (
-	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -27,10 +26,10 @@ func benchmarkPubs(b *testing.B, qos uint8) {
 
 	errs := make(chan error, 1)
 	s := gobroke.Server{}
-	defer s.Stop()
+	defer s.Shutdown()
 
 	go func() {
-		if err := s.Run(context.Background()); err != nil {
+		if err := s.Run(); err != nil {
 			errs <- err
 		}
 	}()

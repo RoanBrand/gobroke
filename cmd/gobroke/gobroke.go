@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"flag"
 	"os"
 	"path/filepath"
@@ -36,7 +35,7 @@ func (p *program) Start(s service.Service) error {
 	}
 
 	go func() {
-		if err := p.server.Run(context.Background()); err != nil {
+		if err := p.server.Run(); err != nil {
 			log.Fatal(err)
 		}
 	}()
@@ -44,7 +43,7 @@ func (p *program) Start(s service.Service) error {
 }
 
 func (p *program) Stop(s service.Service) error {
-	p.server.Stop()
+	p.server.Shutdown()
 	return nil
 }
 
