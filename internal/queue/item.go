@@ -8,10 +8,9 @@ import (
 
 // Item is stored in various publish message queues.
 type Item struct {
-	P *model.PubMessage
+	Sent int64 // QoS 1&2, PUBREL
 
-	// up to 7Feb2106 with time.Now().Unix()
-	Sent uint32 // QoS 1&2, PUBREL
+	P *model.PubMessage
 
 	PId      uint16 // QoS 1&2, PUBREL
 	TxQoS    uint8

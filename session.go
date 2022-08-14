@@ -52,19 +52,22 @@ type session struct {
 }
 
 type packet struct {
-	controlType     uint8
-	flags           uint8
+	vhBuf   []byte
+	payload []byte // sometimes used as temp buf for tx from reader thread
+
 	remainingLength uint32 // max 268,435,455 (256 MB)
 	lenMul          uint32
 
 	// Variable header
 	vhToRead     uint32
 	vhPropToRead uint32
-	vhBuf        []byte
-	pID          uint16 // subscribe, unsubscribe, publish with QoS>0.
-	topicAlias   uint16 // PUBLISH
+	expiry       uint32
 
-	payload []byte // sometimes used as temp buf for tx from reader thread
+	pID        uint16 // subscribe, unsubscribe, publish with QoS>0.
+	topicAlias uint16 // PUBLISH
+
+	controlType uint8
+	flags       uint8
 }
 
 type topicAliasesClient struct {
@@ -292,6 +295,7 @@ func (s *session) sendConnackFail(reasonCode uint8) error {
 
 func (s *session) sendPublish(i *queue.Item) error {
 	var publish byte = model.PUBLISH
+	var now int64
 
 	if i.Retained {
 		publish |= 0x01
@@ -306,18 +310,32 @@ func (s *session) sendPublish(i *queue.Item) error {
 		if i.Sent != 0 {
 			publish |= 0x08 // set DUP if sent before
 		}
-		atomic.StoreUint32(&i.Sent, uint32(time.Now().Unix()))
+		now = time.Now().Unix()
+		atomic.StoreInt64(&i.Sent, now)
 	} else {
 		s.decSendQuota()
 	}
 
+	if i.P.Expiry != 0 {
+		if now == 0 {
+			now = time.Now().Unix()
+		}
+		if now >= i.P.Expiry {
+			return s.discardPublish(i)
+		}
+		if s.protoVersion > 4 {
+			left := uint32(i.P.Expiry - now)
+			i.P.Props = append(i.P.Props, model.MessageExpiryInterval, byte(left>>24), byte(left>>16), byte(left>>8), byte(left))
+		}
+	}
+
 	tLen := binary.BigEndian.Uint16(i.P.B[1:])
 	topicUTF8 := i.P.B[1 : 3+tLen]
+	var pl int
 	var tAlias uint16
-	haveTAlias, newTAlias := false, false
-	pl := 0
+	var haveTAlias, newTAlias bool
 
-	if s.protoVersion == 5 {
+	if s.protoVersion > 4 {
 		// Topic Alias
 		if s.topicAliasMax > 0 && !i.Retained {
 			// save Topic Aliases for non-retained msgs
@@ -346,29 +364,18 @@ func (s *session) sendPublish(i *queue.Item) error {
 			}
 		}
 
-		// Properties Length
-		pl = len(i.P.Props)
 		if haveTAlias {
-			pl += 3
+			i.P.Props = append(i.P.Props, model.TopicAlias, byte(tAlias>>8), byte(tAlias))
 		}
 
+		// Properties Length
+		pl = len(i.P.Props)
 		rl += pl + model.LengthToNumberOfVariableLengthBytes(pl)
 
 		// Too large, discard. v5[MQTT-3.1.2-24]
 		if max := int(s.maxPacketSize); max != 0 && (rl > max ||
 			1+rl+model.LengthToNumberOfVariableLengthBytes(rl) > max) {
-			i.P.FreeIfLastUser()
-			if qos > 0 {
-				if qos == 1 {
-					s.client.q1.Remove(i)
-				} else {
-					s.client.q2.Remove(i)
-				}
-
-				queue.ReturnItemQos12(i)
-				s.client.pIDs <- i.PId
-			}
-			return nil
+			return s.discardPublish(i)
 		}
 	}
 
@@ -394,16 +401,10 @@ func (s *session) sendPublish(i *queue.Item) error {
 	}
 
 	// Properties
-	if s.protoVersion == 5 {
+	if s.protoVersion > 4 {
 		model.VariableLengthEncodeNoAlloc(pl, func(eb byte) error {
 			return s.client.tx.WriteByte(eb)
 		})
-
-		if haveTAlias {
-			s.client.tx.WriteByte(model.TopicAlias)
-			s.client.tx.WriteByte(byte(tAlias >> 8))
-			s.client.tx.WriteByte(byte(tAlias))
-		}
 
 		s.client.tx.Write(i.P.Props)
 	}
@@ -420,6 +421,22 @@ func (s *session) sendPublish(i *queue.Item) error {
 	}
 
 	return err
+}
+
+// Discard before sending
+func (s *session) discardPublish(i *queue.Item) error {
+	i.P.FreeIfLastUser()
+	if i.TxQoS > 0 {
+		if i.TxQoS == 1 {
+			s.client.q1.Remove(i)
+		} else {
+			s.client.q2.Remove(i)
+		}
+
+		queue.ReturnItemQos12(i)
+		s.client.pIDs <- i.PId
+	}
+	return nil
 }
 
 func (s *session) sendPuback(pId uint16) error {
@@ -459,7 +476,7 @@ func (s *session) sendPubrelFromQueue(i *queue.Item) error {
 	s.client.txLock.Unlock()
 	s.client.notifyFlusher()
 
-	i.Sent = uint32(time.Now().Unix())
+	i.Sent = time.Now().Unix()
 	return err
 }
 

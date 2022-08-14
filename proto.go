@@ -45,6 +45,8 @@ var (
 	// The Client wishes to disconnect but requires
 	// that the Server also publishes its Will Message.
 	errGotDisconWithWill = errors.New("WithWill")
+	// Publish received with expiry == 0. Do not forward.
+	errPubExpired = errors.New("EOA")
 )
 
 func (s *Server) parseStream(ses *session, rx []byte) error {
@@ -651,7 +653,7 @@ func (s *Server) handleConnectProperties(ses *session) error {
 	vh := ses.packet.vhBuf
 	pnLen := binary.BigEndian.Uint16(vh)
 	props := vh[pnLen+6:]
-	gotSesExp, gotRxMax, gotMaxPSize, gotTopAlias, gotRRI, gotRPI := false, false, false, false, false, false
+	var gotSesExp, gotRxMax, gotMaxPSize, gotTopAlias, gotRRI, gotRPI bool
 
 	for i := 0; i < len(props); {
 		remain := len(props) - i
@@ -829,6 +831,7 @@ func (s *Server) handlePublish(ses *session) error {
 	if p.flags&0x06 > 0 { // Qos > 0
 		propsIdx += 2
 	}
+
 	props := p.vhBuf[propsIdx:]
 	if len(props) > 0 {
 		if cap(pub.Props) < len(props) {
@@ -840,7 +843,21 @@ func (s *Server) handlePublish(ses *session) error {
 		var err error
 		pub.Props, err = ses.handlePublishProperties(pub.Props, props)
 		if err != nil {
+			pub.FreeIfLastUser()
+			if err == errPubExpired {
+				if qos := pub.RxQoS(); qos == 1 {
+					return ses.sendPuback(p.pID)
+				} else if qos == 2 {
+					return ses.sendPubrec(p.pID)
+				}
+				return nil
+			}
 			return err
+		}
+
+		if p.expiry != 0 {
+			pub.Expiry = time.Now().Add(time.Duration(p.expiry) * time.Second).Unix()
+			p.expiry = 0
 		}
 	}
 
@@ -879,7 +896,7 @@ func (s *Server) handlePublish(ses *session) error {
 }
 
 func (s *session) handlePublishProperties(tx, rx []byte) ([]byte, error) {
-	gotTA, gotRT, gotCD, gotCT := false, false, false, false
+	var gotMEI, gotTA, gotRT, gotCD, gotCT bool
 
 	for i := 0; i < len(rx); {
 		remain := len(rx) - i
@@ -897,13 +914,13 @@ func (s *session) handlePublishProperties(tx, rx []byte) ([]byte, error) {
 			}
 			tx = append(tx, rx[i:i+2]...)
 			i += 2
-		case model.MessageExpiryInterval:
+		case model.MessageExpiryInterval: // just use the last value
 			if remain < 5 {
 				s.disconnectReasonCode = model.MalformedPacket
 				return nil, errors.New("malformed PUBLISH: bad Message Expiry Interval")
 			}
-			// TODO: message expiry
-			tx = append(tx, rx[i:i+5]...)
+			s.packet.expiry = binary.BigEndian.Uint32(rx[i+1:])
+			gotMEI = true
 			i += 5
 		case model.TopicAlias:
 			if gotTA {
@@ -998,6 +1015,11 @@ func (s *session) handlePublishProperties(tx, rx []byte) ([]byte, error) {
 			return nil, fmt.Errorf("malformed PUBLISH: unknown property %d (0x%x)", rx[i], rx[i])
 		}
 	}
+
+	if gotMEI && s.packet.expiry == 0 {
+		return nil, errPubExpired
+	}
+
 	return tx, nil
 }
 
@@ -1177,7 +1199,7 @@ func (s *Server) handleUnSubscribeProperties(ses *session) error {
 
 func (s *Server) handleDisconnectProperties(ses *session) error {
 	props := ses.packet.vhBuf[1:]
-	gotSesExp, gotReasonStr := false, false
+	var gotSesExp, gotReasonStr bool
 
 	for i := 0; i < len(props); {
 		remain := len(props) - i

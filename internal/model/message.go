@@ -9,6 +9,8 @@ import (
 type PubMessage struct {
 	refs int32
 
+	Expiry int64
+
 	// flags + topicUTF8 + payload
 	// byte 0: publish flags, i.e. DUP, QoS, Retain
 	// byte 1: topicUTF8
@@ -34,19 +36,13 @@ func NewPub(requiredBLen int) (p *PubMessage) {
 		}
 	}
 
+	p.Expiry = 0
 	p.refs = 1
 	return p
 }
 
 func NewPubOld(flags uint8, topicUTF8, payload []byte) (p *PubMessage) {
-	if pi := pool.Get(); pi == nil {
-		p = &PubMessage{B: make([]byte, 1, 1+len(topicUTF8)+len(payload))}
-	} else {
-		p = pi.(*PubMessage)
-		p.B = p.B[:1]
-	}
-
-	p.refs = 1
+	p = NewPub(1 + len(topicUTF8) + len(payload))
 	p.B[0] = flags
 	p.B = append(p.B, topicUTF8...)
 	p.B = append(p.B, payload...)

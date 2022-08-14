@@ -135,7 +135,7 @@ func (q *queue) monitorTimeouts(ctx context.Context, toMS uint64, timedOut func(
 
 			q.Lock()
 			for i := q.h; i != nil; i = i.next {
-				sent := int64(atomic.LoadUint32(&i.Sent))
+				sent := atomic.LoadInt64(&i.Sent)
 				if sent == 0 {
 					break // if we encounter unsent, stop
 				}
