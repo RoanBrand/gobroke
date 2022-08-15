@@ -303,14 +303,19 @@ func retainHandling(so uint8) uint8 {
 	return so >> 4
 }
 
+type subscription struct {
+	id      uint32
+	options uint8
+}
+
 type topicLevel struct {
 	children    topicTree
-	subscribers map[*client]uint8 // client -> Subscription Options
+	subscribers map[*client]subscription
 }
 
 func (tl *topicLevel) init() {
 	tl.children = make(topicTree)
-	tl.subscribers = make(map[*client]uint8)
+	tl.subscribers = make(map[*client]subscription)
 }
 
 type topicTree map[string]*topicLevel // level -> sub levels
@@ -336,7 +341,7 @@ func (s *Server) removeClientSubscriptions(c *client) {
 }
 
 // Add subscriptions for client. Also check for matching retained messages.
-func (s *Server) addSubscriptions(c *client, topics [][][]byte, subOps []uint8) {
+func (s *Server) addSubscriptions(c *client, topics [][][]byte, ops []uint8, id uint32) {
 	s.subLock.Lock()
 	defer s.subLock.Unlock()
 
@@ -366,17 +371,18 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, subOps []uint8) 
 		}
 
 		subDoesExist := cTL.subscribed
-		sTL.subscribers[c] = subOps[i]
+		sub := subscription{id, ops[i]}
+		sTL.subscribers[c] = sub
 		cTL.subscribed = true
 
 		// Retained messages
-		if rh := retainHandling(subOps[i]); rh == 2 || (rh == 1 && subDoesExist) {
+		if rh := retainHandling(ops[i]); rh == 2 || (rh == 1 && subDoesExist) {
 			continue
 		}
 
 		forwardLevel := func(l *retainLevel) {
 			if l.p != nil {
-				c.processPub(l.p, subOps[i], true)
+				c.processPub(l.p, sub, true)
 			}
 		}
 
@@ -469,8 +475,8 @@ loop:
 }
 
 func (s *Server) forwardToSubscribers(tl *topicLevel, p *model.PubMessage) {
-	for c, subOp := range tl.subscribers {
-		c.processPub(p, subOp, false)
+	for c, sub := range tl.subscribers {
+		c.processPub(p, sub, false)
 	}
 }
 

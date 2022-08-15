@@ -12,6 +12,7 @@ type Item struct {
 
 	P *model.PubMessage
 
+	SId      uint32 // Subscription Id. PUBLISH from Server to Client.
 	PId      uint16 // QoS 1&2, PUBREL
 	TxQoS    uint8
 	Retained bool // Msg sent to client due to subscription

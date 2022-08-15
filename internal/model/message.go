@@ -5,11 +5,10 @@ import (
 	"sync/atomic"
 )
 
-// PubMessage is a data message from a client published to the Server.
+// PubMessage represents a PUBLISH packet and its content.
 type PubMessage struct {
-	refs int32
-
 	Expiry int64
+	refs   int32
 
 	// flags + topicUTF8 + payload
 	// byte 0: publish flags, i.e. DUP, QoS, Retain
@@ -17,9 +16,9 @@ type PubMessage struct {
 	// byte 3+topicLen: payload
 	B []byte
 
-	Props []byte
+	Props []byte // Properties to be forwarded as is
 
-	Publisher string
+	Publisher string // ClientId
 }
 
 var pool = sync.Pool{}

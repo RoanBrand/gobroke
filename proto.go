@@ -110,7 +110,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			i++
 		case length:
 			p.remainingLength += uint32(rx[i]&127) * p.lenMul
-			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
+			if p.lenMul > maxVarLenMul {
 				return errors.New("malformed packet: bad remaining length")
 			}
 
@@ -172,6 +172,8 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					p.vhBuf = p.vhBuf[:0]
 					ses.rxState = variableHeader
 				}
+			} else {
+				p.lenMul *= 128
 			}
 
 			i++
@@ -373,7 +375,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			i += toRead
 		case propertiesLen:
 			p.vhPropToRead += uint32(rx[i]&127) * p.lenMul
-			if p.lenMul *= 128; p.lenMul > maxVarLenMul {
+			if p.lenMul > maxVarLenMul {
 				return errors.New("malformed packet: bad Properties Length")
 			}
 
@@ -417,6 +419,8 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				} else {
 					ses.rxState = properties
 				}
+			} else {
+				p.lenMul *= 128
 			}
 
 			i++
@@ -464,9 +468,9 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					ses.client.qos2Part2Done(binary.BigEndian.Uint16(p.vhBuf))
 					ses.rxState = controlAndFlags
 				case model.SUBSCRIBE:
-					if err := s.handleSubscribeProperties(ses); err != nil {
+					/*if err := ses.handleSubscribeProperties(); err != nil {
 						return err
-					}
+					}*/
 					p.payload = p.payload[:0]
 					ses.rxState = payload
 				case model.UNSUBSCRIBE:
@@ -1024,10 +1028,19 @@ func (s *session) handlePublishProperties(tx, rx []byte) ([]byte, error) {
 }
 
 func (s *Server) handleSubscribe(ses *session) error {
+	var subId int
+
+	if ses.protoVersion > 4 {
+		var err error
+		if subId, err = ses.handleSubscribeProperties(); err != nil {
+			return err
+		}
+	}
+
 	p := ses.packet.payload
 	topics, subOps := make([][][]byte, 0, 2), make([]uint8, 0, 2)
-	i := uint32(0)
 
+	var i uint32
 	for i < uint32(len(p)) {
 		topicL := uint32(binary.BigEndian.Uint16(p[i:]))
 		i += 2
@@ -1069,66 +1082,65 @@ func (s *Server) handleSubscribe(ses *session) error {
 		i += 1 + topicL
 	}
 
-	s.addSubscriptions(ses.client, topics, subOps)
+	s.addSubscriptions(ses.client, topics, subOps, uint32(subId))
 
 	// [MQTT-3.8.4-1, 4-4, 4-5, 4-6]
 	return ses.sendSuback(subOps)
 }
 
-func (s *Server) handleSubscribeProperties(ses *session) error {
-	props := ses.packet.vhBuf[2:]
-	//gotSubId := false
+func (s *session) handleSubscribeProperties() (int, error) {
+	props := s.packet.vhBuf[2:]
+	var subId int
+	var gotSubId bool
 
 	for i := 0; i < len(props); {
 		remain := len(props) - i
 		switch props[i] {
 		case model.SubscriptionIdentifier:
-			ses.disconnectReasonCode = model.SubscriptionIdsNotSupported
-			return errors.New("with SUBSCRIBE: Subscription Identifiers not supported")
-			/*if gotSubId {
-				ses.disconnectReasonCode = model.ProtocolError
-				return errors.New("malformed SUBSCRIBE: Subscription Identifier included more than once")
+			if gotSubId {
+				s.disconnectReasonCode = model.ProtocolError
+				return 0, errors.New("malformed SUBSCRIBE: Subscription Identifier included more than once")
 			}
 			if remain < 2 {
-				return errors.New("malformed SUBSCRIBE: bad Subscription Identifier")
+				return 0, errors.New("malformed SUBSCRIBE: bad Subscription Identifier")
 			}
-			maxSubId, l, err := variableLengthDecode(props[i+1:])
+			sId, l, err := variableLengthDecode(props[i+1:])
 			if err != nil {
-				return errors.New("malformed SUBSCRIBE: bad Subscription Identifier")
+				return 0, errors.New("malformed SUBSCRIBE: bad Subscription Identifier")
 			}
-			if maxSubId == 0 {
-				ses.disconnectReasonCode = model.ProtocolError
-				return errors.New("malformed SUBSCRIBE: Subscription Identifier 0 not allowed")
+			if sId == 0 {
+				s.disconnectReasonCode = model.ProtocolError
+				return 0, errors.New("malformed SUBSCRIBE: Subscription Identifier 0 not allowed")
 			}
-
+			subId = sId
 			gotSubId = true
-			i += 1 + l*/
+			i += 1 + l
 		case model.UserProperty:
 			if remain < 5 {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed SUBSCRIBE: bad User Property")
+				s.disconnectReasonCode = model.MalformedPacket
+				return 0, errors.New("malformed SUBSCRIBE: bad User Property")
 			}
 
 			kLen := int(binary.BigEndian.Uint16(props[i+1:]))
 			if remain < 5+kLen {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed SUBSCRIBE: bad User Property")
+				s.disconnectReasonCode = model.MalformedPacket
+				return 0, errors.New("malformed SUBSCRIBE: bad User Property")
 			}
 
 			vLen := int(binary.BigEndian.Uint16(props[i+3+kLen:]))
 			expect := 5 + kLen + vLen
 			if remain < expect {
-				ses.disconnectReasonCode = model.MalformedPacket
-				return errors.New("malformed SUBSCRIBE: bad User Property")
+				s.disconnectReasonCode = model.MalformedPacket
+				return 0, errors.New("malformed SUBSCRIBE: bad User Property")
 			}
 
 			i += expect
 		default:
-			ses.disconnectReasonCode = model.MalformedPacket
-			return fmt.Errorf("malformed SUBSCRIBE: unknown property %d (0x%x)", props[i], props[i])
+			s.disconnectReasonCode = model.MalformedPacket
+			return 0, fmt.Errorf("malformed SUBSCRIBE: unknown property %d (0x%x)", props[i], props[i])
 		}
 	}
-	return nil
+	return subId, nil
 }
 
 func (s *Server) handleUnsubscribe(ses *session) error {
@@ -1303,22 +1315,26 @@ func checkUTF8(str []byte, checkWildCards bool) error {
 	return nil
 }
 
+// returns decoded length, as well as the number of Variable Length bytes.
 func variableLengthDecode(b []byte) (int, int, error) {
-	l, lMul, i := 0, 1, 0
+	var l, i int
+	var lMul int = 1
 	var err error
 
+	max := len(b) - 1
 	for done := false; !done; i++ {
-		if i > len(b)-1 {
+		if i > max {
 			err = errors.New("bad Variable Length")
 			break
 		}
 
 		l += int(b[i]&127) * lMul
-		if lMul *= 128; lMul > maxVarLenMul {
+		if lMul > maxVarLenMul {
 			err = errors.New("bad Variable Length")
 			break
 		}
 
+		lMul *= 128
 		done = b[i]&128 == 0
 	}
 	return l, i, err

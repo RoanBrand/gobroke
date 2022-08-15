@@ -225,7 +225,6 @@ func (s *session) updateTimeout() {
 
 var connackProps = []byte{
 	model.TopicAliasMaximum, 0xFF, 0xFF, // support max value Topic Alias Maximum
-	model.SubscriptionIdentifiersAvailable, 0, // not supported yet
 	model.SharedSubscriptionsAvailable, 0, // not supported yet
 }
 
@@ -316,6 +315,9 @@ func (s *session) sendPublish(i *queue.Item) error {
 		s.decSendQuota()
 	}
 
+	pl := len(i.P.Props)
+	var untilExpiry uint32
+
 	if i.P.Expiry != 0 {
 		if now == 0 {
 			now = time.Now().Unix()
@@ -324,21 +326,20 @@ func (s *session) sendPublish(i *queue.Item) error {
 			return s.discardPublish(i)
 		}
 		if s.protoVersion > 4 {
-			left := uint32(i.P.Expiry - now)
-			i.P.Props = append(i.P.Props, model.MessageExpiryInterval, byte(left>>24), byte(left>>16), byte(left>>8), byte(left))
+			untilExpiry = uint32(i.P.Expiry - now)
+			pl += 5
 		}
 	}
 
 	tLen := binary.BigEndian.Uint16(i.P.B[1:])
 	topicUTF8 := i.P.B[1 : 3+tLen]
-	var pl int
+
 	var tAlias uint16
 	var haveTAlias, newTAlias bool
 
 	if s.protoVersion > 4 {
 		// Topic Alias
-		if s.topicAliasMax > 0 && !i.Retained {
-			// save Topic Aliases for non-retained msgs
+		if s.topicAliasMax > 0 {
 			t := topicUTF8[2:]
 			tStrRead := bytesToStringUnsafe(t)
 
@@ -346,7 +347,8 @@ func (s *session) sendPublish(i *queue.Item) error {
 			tAlias, haveTAlias = s.taToClient.aliases[tStrRead]
 			s.taToClient.lock.RUnlock()
 
-			if !haveTAlias && atomic.LoadInt32(&s.taToClient.left) > 0 {
+			// save for non-retained msgs
+			if !haveTAlias && !i.Retained && atomic.LoadInt32(&s.taToClient.left) > 0 {
 				s.taToClient.lock.Lock()
 				tAlias, haveTAlias = s.taToClient.aliases[tStrRead]
 				if !haveTAlias {
@@ -359,17 +361,20 @@ func (s *session) sendPublish(i *queue.Item) error {
 				}
 				s.taToClient.lock.Unlock()
 			}
-			if haveTAlias && !newTAlias {
-				rl -= len(t)
+			if haveTAlias {
+				pl += 3
+				if !newTAlias {
+					rl -= len(t)
+				}
 			}
 		}
 
-		if haveTAlias {
-			i.P.Props = append(i.P.Props, model.TopicAlias, byte(tAlias>>8), byte(tAlias))
+		// Subscription Id
+		if i.SId != 0 {
+			pl += 1 + model.LengthToNumberOfVariableLengthBytes(int(i.SId))
 		}
 
-		// Properties Length
-		pl = len(i.P.Props)
+		// Properties Length & Remaining Length
 		rl += pl + model.LengthToNumberOfVariableLengthBytes(pl)
 
 		// Too large, discard. v5[MQTT-3.1.2-24]
@@ -407,6 +412,27 @@ func (s *session) sendPublish(i *queue.Item) error {
 		})
 
 		s.client.tx.Write(i.P.Props)
+
+		if untilExpiry != 0 {
+			s.client.tx.WriteByte(model.MessageExpiryInterval)
+			s.client.tx.WriteByte(byte(untilExpiry >> 24))
+			s.client.tx.WriteByte(byte(untilExpiry >> 16))
+			s.client.tx.WriteByte(byte(untilExpiry >> 8))
+			s.client.tx.WriteByte(byte(untilExpiry))
+		}
+
+		if haveTAlias {
+			s.client.tx.WriteByte(model.TopicAlias)
+			s.client.tx.WriteByte(byte(tAlias >> 8))
+			s.client.tx.WriteByte(byte(tAlias))
+		}
+
+		if i.SId != 0 {
+			s.client.tx.WriteByte(model.SubscriptionIdentifier)
+			model.VariableLengthEncodeNoAlloc(int(i.SId), func(eb byte) error {
+				return s.client.tx.WriteByte(eb)
+			})
+		}
 	}
 
 	// Payload

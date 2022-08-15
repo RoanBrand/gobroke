@@ -82,19 +82,19 @@ func (c *client) notifyFlusher() {
 	}
 }
 
-func (c *client) processPub(p *model.PubMessage, subOps uint8, retained bool) {
-	if noLocal(subOps) && c.session.clientId == p.Publisher {
+func (c *client) processPub(p *model.PubMessage, sub subscription, retained bool) {
+	if noLocal(sub.options) && c.session.clientId == p.Publisher {
 		return // v5[MQTT-3.8.3-3]
 	}
 
 	finalQoS := p.RxQoS()
-	if m := maxQoS(subOps); m < finalQoS {
+	if m := maxQoS(sub.options); m < finalQoS {
 		finalQoS = m
 	}
 
 	i := queue.GetItem(p)
-	i.TxQoS, i.Retained = finalQoS, retained
-	if p.ToRetain() && retainAsPublished(subOps) {
+	i.SId, i.TxQoS, i.Retained = sub.id, finalQoS, retained
+	if p.ToRetain() && retainAsPublished(sub.options) {
 		i.Retained = true
 	}
 
