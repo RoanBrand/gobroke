@@ -493,6 +493,10 @@ func (s *Server) matchTopicLevel(p *model.PubMessage, l topicTree, ln int) {
 		}
 	}
 
+	if ln == 0 && s.sepPubTopic[0][0] == '$' {
+		return // [MQTT-4.7.2-1]
+	}
+
 	// # match
 	if nl, ok := l["#"]; ok {
 		s.forwardToSubscribers(nl, p)
