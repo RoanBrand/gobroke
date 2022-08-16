@@ -385,11 +385,9 @@ func (s *session) sendPublish(i *queue.Item) error {
 	}
 
 	s.client.txLock.Lock()
-	s.client.tx.WriteByte(publish)
 
-	model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
-		return s.client.tx.WriteByte(eb)
-	})
+	s.client.tx.WriteByte(publish)
+	model.VariableLengthEncodeNoAlloc(rl, s.client.tx.WriteByte)
 
 	// Topic Name
 	if !haveTAlias || newTAlias {
@@ -407,10 +405,7 @@ func (s *session) sendPublish(i *queue.Item) error {
 
 	// Properties
 	if s.protoVersion > 4 {
-		model.VariableLengthEncodeNoAlloc(pl, func(eb byte) error {
-			return s.client.tx.WriteByte(eb)
-		})
-
+		model.VariableLengthEncodeNoAlloc(pl, s.client.tx.WriteByte)
 		s.client.tx.Write(i.P.Props)
 
 		if untilExpiry != 0 {
@@ -429,9 +424,7 @@ func (s *session) sendPublish(i *queue.Item) error {
 
 		if i.SId != 0 {
 			s.client.tx.WriteByte(model.SubscriptionIdentifier)
-			model.VariableLengthEncodeNoAlloc(int(i.SId), func(eb byte) error {
-				return s.client.tx.WriteByte(eb)
-			})
+			model.VariableLengthEncodeNoAlloc(int(i.SId), s.client.tx.WriteByte)
 		}
 	}
 
@@ -527,10 +520,7 @@ func (s *session) sendSuback(subOps []uint8) error {
 	s.client.txLock.Lock()
 
 	s.client.tx.WriteByte(model.SUBACK)
-
-	model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
-		return s.client.tx.WriteByte(eb)
-	})
+	model.VariableLengthEncodeNoAlloc(rl, s.client.tx.WriteByte)
 
 	// Variable Header
 	s.client.tx.WriteByte(s.packet.vhBuf[0]) // [MQTT-3.8.4-2]
@@ -557,10 +547,7 @@ func (s *session) sendUnsuback(nTopics int) error {
 	s.client.txLock.Lock()
 
 	s.client.tx.WriteByte(model.UNSUBACK)
-
-	model.VariableLengthEncodeNoAlloc(rl, func(eb byte) error {
-		return s.client.tx.WriteByte(eb)
-	})
+	model.VariableLengthEncodeNoAlloc(rl, s.client.tx.WriteByte)
 
 	// Variable Header
 	s.client.tx.WriteByte(s.packet.vhBuf[0])

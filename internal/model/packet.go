@@ -74,18 +74,15 @@ func VariableLengthEncode(packet []byte, l int) []byte {
 	return packet
 }
 
-func VariableLengthEncodeNoAlloc(l int, f func(eb byte) error) error {
+func VariableLengthEncodeNoAlloc(l int, f func(eb byte) error) {
 	for {
 		eb := l % 128
 		l /= 128
 		if l > 0 {
 			eb |= 128
 		}
-		if err := f(byte(eb)); err != nil { // No new memory allocation
-			return err
-		}
-		if l <= 0 {
-			return nil
+		if err := f(byte(eb)); err != nil || l <= 0 {
+			return
 		}
 	}
 }
