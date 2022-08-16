@@ -61,7 +61,7 @@ type subackInfo struct {
 func (c *fakeClient) reader() {
 	rx := make([]byte, 4096)
 	var rxState, controlAndFlags, controlB uint8
-	var remainLen, lenMul, vhLen uint32
+	var remainLen, lenMul, vhLen int
 	vh, payload := make([]byte, 0, 512), make([]byte, 0, 512)
 	defer c.wg.Done()
 
@@ -75,8 +75,8 @@ func (c *fakeClient) reader() {
 			return
 		}
 
-		i, l := uint32(0), uint32(len(rx[:nRx]))
-		for i < l {
+		l := len(rx[:nRx])
+		for i := 0; i < l; {
 			switch rxState {
 			case 0: // control & flags
 				controlAndFlags = rx[i]
@@ -84,7 +84,7 @@ func (c *fakeClient) reader() {
 				lenMul, remainLen, rxState = 1, 0, 1
 				i++
 			case 1: // remaining len
-				remainLen += uint32(rx[i]&127) * lenMul
+				remainLen += int(rx[i]&127) * lenMul
 				lenMul *= 128
 				if rx[i]&128 == 0 {
 					switch controlB {
@@ -114,7 +114,7 @@ func (c *fakeClient) reader() {
 				remainLen--
 
 				if vhLen == 2 {
-					vhLen = uint32(binary.BigEndian.Uint16(vh))
+					vhLen = int(binary.BigEndian.Uint16(vh))
 					if controlAndFlags&0x06 > 0 {
 						vhLen += 2
 					}

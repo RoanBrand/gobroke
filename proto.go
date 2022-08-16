@@ -50,10 +50,9 @@ var (
 )
 
 func (s *Server) parseStream(ses *session, rx []byte) error {
-	p, l := &ses.packet, uint32(len(rx))
-	var i uint32
+	p, l := &ses.packet, len(rx)
 
-	for i < l {
+	for i := 0; i < l; {
 		switch ses.rxState {
 		case controlAndFlags:
 			p.controlType, p.flags = rx[i]&0xF0, rx[i]&0x0F
@@ -109,7 +108,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			p.lenMul = 1
 			i++
 		case length:
-			p.remainingLength += uint32(rx[i]&127) * p.lenMul
+			p.remainingLength += int(rx[i]&127) * p.lenMul
 			if p.lenMul > maxVarLenMul {
 				return errors.New("malformed packet: bad remaining length")
 			}
@@ -188,7 +187,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 			p.remainingLength -= toRead
 
 			if p.vhToRead == 0 {
-				p.vhToRead = uint32(binary.BigEndian.Uint16(p.vhBuf))
+				p.vhToRead = int(binary.BigEndian.Uint16(p.vhBuf))
 				if p.controlType == model.PUBLISH {
 					rawQoS := p.flags & 0x06
 					if rawQoS > 0 { // Qos > 0
@@ -374,7 +373,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 			i += toRead
 		case propertiesLen:
-			p.vhPropToRead += uint32(rx[i]&127) * p.lenMul
+			p.vhPropToRead += int(rx[i]&127) * p.lenMul
 			if p.lenMul > maxVarLenMul {
 				return errors.New("malformed packet: bad Properties Length")
 			}
@@ -501,10 +500,10 @@ var unNamedClients uint32
 
 func (s *Server) handleConnect(ses *session) error {
 	p := ses.packet.payload
-	pLen := uint32(len(p))
+	pLen := len(p)
 
 	// ClientId
-	clientIdLen := uint32(binary.BigEndian.Uint16(p))
+	clientIdLen := int(binary.BigEndian.Uint16(p))
 	offs := 2 + clientIdLen
 	if pLen < offs {
 		return errors.New("malformed CONNECT: payload too short for ClientId")
@@ -541,7 +540,7 @@ func (s *Server) handleConnect(ses *session) error {
 				return errors.New("malformed CONNECT: bad Will Properties Length")
 			}
 			// TODO: store and use Will Properties
-			offs += uint32(vbLen) + uint32(wpLen)
+			offs += vbLen + wpLen
 		}
 
 		// Topic
@@ -550,7 +549,7 @@ func (s *Server) handleConnect(ses *session) error {
 		}
 
 		wTopicUTFStart := offs
-		wTopicLen := uint32(binary.BigEndian.Uint16(p[offs:]))
+		wTopicLen := int(binary.BigEndian.Uint16(p[offs:]))
 		offs += 2
 		if pLen < offs+wTopicLen {
 			return errors.New("malformed CONNECT: payload too short for Will Topic")
@@ -567,7 +566,7 @@ func (s *Server) handleConnect(ses *session) error {
 			return errors.New("malformed CONNECT: bad Will Topic: " + err.Error())
 		}
 
-		wMsgLen := uint32(binary.BigEndian.Uint16(p[offs:]))
+		wMsgLen := int(binary.BigEndian.Uint16(p[offs:]))
 		offs += 2
 		if pLen < offs+wMsgLen {
 			return errors.New("malformed CONNECT: payload too short for Will Message")
@@ -597,7 +596,7 @@ func (s *Server) handleConnect(ses *session) error {
 			return errors.New("malformed CONNECT: no User Name in payload")
 		}
 
-		userLen := uint32(binary.BigEndian.Uint16(p[offs:]))
+		userLen := int(binary.BigEndian.Uint16(p[offs:]))
 		offs += 2
 		if pLen < offs+userLen {
 			return errors.New("malformed CONNECT: payload too short for User Name")
@@ -616,7 +615,7 @@ func (s *Server) handleConnect(ses *session) error {
 				return errors.New("malformed CONNECT: no Password in payload")
 			}
 
-			passLen := uint32(binary.BigEndian.Uint16(p[offs:]))
+			passLen := int(binary.BigEndian.Uint16(p[offs:]))
 			offs += 2
 			if pLen < offs+passLen {
 				return errors.New("malformed CONNECT: payload too short for Password")
@@ -1040,9 +1039,8 @@ func (s *Server) handleSubscribe(ses *session) error {
 	p := ses.packet.payload
 	topics, subOps := make([][][]byte, 0, 2), make([]uint8, 0, 2)
 
-	var i uint32
-	for i < uint32(len(p)) {
-		topicL := uint32(binary.BigEndian.Uint16(p[i:]))
+	for i := 0; i < len(p); {
+		topicL := int(binary.BigEndian.Uint16(p[i:]))
 		i += 2
 		topicEnd := i + topicL
 		subOp := p[topicEnd]
@@ -1146,10 +1144,9 @@ func (s *session) handleSubscribeProperties() (int, error) {
 func (s *Server) handleUnsubscribe(ses *session) error {
 	p := ses.packet.payload
 	topics := make([][][]byte, 0, 2)
-	i := uint32(0)
 
-	for i < uint32(len(p)) {
-		topicL := uint32(binary.BigEndian.Uint16(p[i:]))
+	for i := 0; i < len(p); {
+		topicL := int(binary.BigEndian.Uint16(p[i:]))
 		i += 2
 		topicEnd := i + topicL
 		topic := p[i:topicEnd]

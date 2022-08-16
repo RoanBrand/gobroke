@@ -55,12 +55,12 @@ type packet struct {
 	vhBuf   []byte
 	payload []byte // sometimes used as temp buf for tx from reader thread
 
-	remainingLength uint32 // max 268,435,455 (256 MB)
-	lenMul          uint32
+	remainingLength int // max 268,435,455 (256 MB)
+	lenMul          int
 
 	// Variable header
-	vhToRead     uint32
-	vhPropToRead uint32
+	vhToRead     int
+	vhPropToRead int
 	expiry       uint32
 
 	pID        uint16 // subscribe, unsubscribe, publish with QoS>0.
@@ -71,9 +71,9 @@ type packet struct {
 }
 
 type topicAliasesClient struct {
-	left    int32
+	sync.RWMutex
 	aliases map[string]uint16
-	lock    sync.RWMutex
+	left    int32
 }
 
 func (s *session) run() {
@@ -343,13 +343,13 @@ func (s *session) sendPublish(i *queue.Item) error {
 			t := topicUTF8[2:]
 			tStrRead := bytesToStringUnsafe(t)
 
-			s.taToClient.lock.RLock()
+			s.taToClient.RLock()
 			tAlias, haveTAlias = s.taToClient.aliases[tStrRead]
-			s.taToClient.lock.RUnlock()
+			s.taToClient.RUnlock()
 
 			// save for non-retained msgs
 			if !haveTAlias && !i.Retained && atomic.LoadInt32(&s.taToClient.left) > 0 {
-				s.taToClient.lock.Lock()
+				s.taToClient.Lock()
 				tAlias, haveTAlias = s.taToClient.aliases[tStrRead]
 				if !haveTAlias {
 					newLeft := atomic.AddInt32(&s.taToClient.left, -1)
@@ -359,7 +359,7 @@ func (s *session) sendPublish(i *queue.Item) error {
 						haveTAlias, newTAlias = true, true
 					}
 				}
-				s.taToClient.lock.Unlock()
+				s.taToClient.Unlock()
 			}
 			if haveTAlias {
 				pl += 3
@@ -378,8 +378,8 @@ func (s *session) sendPublish(i *queue.Item) error {
 		rl += pl + model.LengthToNumberOfVariableLengthBytes(pl)
 
 		// Too large, discard. v5[MQTT-3.1.2-24]
-		if max := int(s.maxPacketSize); max != 0 && (rl > max ||
-			1+rl+model.LengthToNumberOfVariableLengthBytes(rl) > max) {
+		if max := s.maxPacketSize; max != 0 && (uint32(rl) > max ||
+			uint32(1+rl+model.LengthToNumberOfVariableLengthBytes(rl)) > max) {
 			return s.discardPublish(i)
 		}
 	}
