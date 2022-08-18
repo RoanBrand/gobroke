@@ -79,10 +79,7 @@ func (s *Server) Run() error {
 	}
 	log.WithFields(lf).Info("Starting MQTT server")
 
-	go s.pubs.StartDispatcher(s.ctx, func(i *queue.Item) error {
-		s.matchSubscriptions(i.P)
-		return nil
-	}, nil)
+	go s.pubs.StartDispatcher(s.ctx, s.matchSubscriptions, nil)
 
 	<-s.ctx.Done()
 	err := s.ctx.Err()
@@ -622,17 +619,17 @@ func (s *Server) matchTopicLevel(p *model.PubMessage, l topicTree, ln int) {
 
 // Match published message topic to all subscribers, and forward.
 // Also store pub if retained message.
-func (s *Server) matchSubscriptions(p *model.PubMessage) {
-	tLen := binary.BigEndian.Uint16(p.B[1:])
-	s.splitPubTopic(p.B[3 : 3+tLen])
+func (s *Server) matchSubscriptions(i *queue.Item) error {
+	tLen := binary.BigEndian.Uint16(i.P.B[1:])
+	s.splitPubTopic(i.P.B[3 : 3+tLen])
 
 	s.subLock.RLock()
-	s.matchTopicLevel(p, s.subscriptions, 0)
+	s.matchTopicLevel(i.P, s.subscriptions, 0)
 
-	if !p.ToRetain() {
+	if !i.P.ToRetain() {
 		s.subLock.RUnlock()
-		p.FreeIfLastUser()
-		return
+		i.P.FreeIfLastUser()
+		return nil
 	}
 
 	tr := s.retained
@@ -649,13 +646,13 @@ func (s *Server) matchSubscriptions(p *model.PubMessage) {
 
 	oldRetained := nl.p
 
-	if len(p.B) == 3+int(tLen) {
+	if len(i.P.B) == 3+int(tLen) {
 		// payload empty, so delete existing retained message
 		nl.p = nil
 		s.subLock.RUnlock()
-		p.FreeIfLastUser() // free as not going to be used
+		i.P.FreeIfLastUser() // free as not going to be used
 	} else {
-		nl.p = p
+		nl.p = i.P
 		s.subLock.RUnlock()
 		// do not free p as we transfer ref of this thread to nl.p
 	}
@@ -663,6 +660,8 @@ func (s *Server) matchSubscriptions(p *model.PubMessage) {
 	if oldRetained != nil {
 		oldRetained.FreeIfLastUser()
 	}
+
+	return nil
 }
 
 type retainLevel struct {
