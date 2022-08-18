@@ -155,8 +155,9 @@ func (c *client) qos2Part2Done(pID uint16) {
 }
 
 type topL struct {
-	subscribed bool // to this exact level
-	children   topT
+	children     topT
+	sharedGroups map[string]struct{}
+	subscribed   bool // to this exact level
 }
 
 type topT map[string]*topL

@@ -84,7 +84,6 @@ s.Run()
 
 ## TODO
 * MQTT 5:
-	* Shared Subscriptions
 	* Response Information
 	* Server Keep Alive
 	* AUTH

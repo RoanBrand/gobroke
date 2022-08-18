@@ -37,26 +37,25 @@ const (
 
 // Properties
 const (
-	PayloadFormatIndicator       = 1
-	MessageExpiryInterval        = 2
-	ContentType                  = 3
-	ResponseTopic                = 8
-	CorrelationData              = 9
-	SubscriptionIdentifier       = 11
-	SessionExpiryInterval        = 17
-	AssignedClientIdentifier     = 18
-	AuthenticationMethod         = 21
-	AuthenticationData           = 22
-	RequestProblemInformation    = 23
-	RequestResponseInformation   = 25
-	ServerReference              = 28
-	ReasonString                 = 31
-	ReceiveMaximum               = 33
-	TopicAliasMaximum            = 34
-	TopicAlias                   = 35
-	UserProperty                 = 38
-	MaximumPacketSize            = 39
-	SharedSubscriptionsAvailable = 42
+	PayloadFormatIndicator     = 1
+	MessageExpiryInterval      = 2
+	ContentType                = 3
+	ResponseTopic              = 8
+	CorrelationData            = 9
+	SubscriptionIdentifier     = 11
+	SessionExpiryInterval      = 17
+	AssignedClientIdentifier   = 18
+	AuthenticationMethod       = 21
+	AuthenticationData         = 22
+	RequestProblemInformation  = 23
+	RequestResponseInformation = 25
+	ServerReference            = 28
+	ReasonString               = 31
+	ReceiveMaximum             = 33
+	TopicAliasMaximum          = 34
+	TopicAlias                 = 35
+	UserProperty               = 38
+	MaximumPacketSize          = 39
 )
 
 func VariableLengthEncode(packet []byte, l int) []byte {

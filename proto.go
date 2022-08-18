@@ -40,6 +40,8 @@ var (
 
 	pingRespPacket = []byte{model.PINGRESP, 0}
 
+	isSharedSub = []byte("$share")
+
 	// Close the connection normally. Do not send the Will Message.
 	errGotNormalDiscon = errors.New("Normal")
 	// The Client wishes to disconnect but requires
@@ -1080,7 +1082,9 @@ func (s *Server) handleSubscribe(ses *session) error {
 		i += 1 + topicL
 	}
 
-	s.addSubscriptions(ses.client, topics, subOps, uint32(subId))
+	if err := s.addSubscriptions(ses.client, topics, subOps, uint32(subId)); err != nil {
+		return err
+	}
 
 	// [MQTT-3.8.4-1, 4-4, 4-5, 4-6]
 	return ses.sendSuback(subOps)
@@ -1166,7 +1170,9 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 	}
 
 	c := ses.client
-	s.removeSubscriptions(c, topics)
+	if err := s.removeSubscriptions(c, topics); err != nil {
+		return err
+	}
 
 	// [MQTT-3.10.4-4, 4-5, 4-6]
 	return ses.sendUnsuback(len(topics))

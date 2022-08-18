@@ -308,14 +308,39 @@ type subscription struct {
 	options uint8
 }
 
+type sharedSubscriber struct {
+	c   *client
+	sub subscription
+}
+
+type sharedSub struct {
+	subs []sharedSubscriber
+	next int
+}
+
+func (ss *sharedSub) removeSubber(c *client) {
+	for i := range ss.subs {
+		if ss.subs[i].c == c {
+			//ss.subs = append(ss.subs[:i], ss.subs[i+1:]...)
+			li := len(ss.subs) - 1
+			ss.subs[i] = ss.subs[li]
+			ss.subs[li].c = nil
+			ss.subs = ss.subs[:li]
+			return
+		}
+	}
+}
+
 type topicLevel struct {
 	children    topicTree
 	subscribers map[*client]subscription
+	shared      map[string]*sharedSub
 }
 
 func (tl *topicLevel) init() {
 	tl.children = make(topicTree)
 	tl.subscribers = make(map[*client]subscription)
+	tl.shared = make(map[string]*sharedSub)
 }
 
 type topicTree map[string]*topicLevel // level -> sub levels
@@ -327,9 +352,17 @@ func (s *Server) removeClientSubscriptions(c *client) {
 		for l, cTL := range cLevel {
 			sTL := sLevel[l]
 
+			for gn := range cTL.sharedGroups {
+				sg := sTL.shared[gn]
+				sg.removeSubber(c)
+				if len(sg.subs) == 0 {
+					delete(sTL.shared, gn)
+				}
+				delete(cTL.sharedGroups, gn)
+			}
 			if cTL.subscribed {
-				cTL.subscribed = false
 				delete(sTL.subscribers, c)
+				cTL.subscribed = false
 			}
 			unSub(sTL.children, cTL.children)
 		}
@@ -341,12 +374,22 @@ func (s *Server) removeClientSubscriptions(c *client) {
 }
 
 // Add subscriptions for client. Also check for matching retained messages.
-func (s *Server) addSubscriptions(c *client, topics [][][]byte, ops []uint8, id uint32) {
+func (s *Server) addSubscriptions(c *client, topics [][][]byte, ops []uint8, id uint32) error {
 	s.subLock.Lock()
 	defer s.subLock.Unlock()
 
 	for i, t := range topics {
 		sLev, cLev := s.subscriptions, c.subscriptions
+
+		var shareName string
+		if bytes.Equal(t[0], isSharedSub) {
+			if err := c.session.checkSharedSubscriptionTopicFilter(t); err != nil {
+				return errors.New("malformed SUBSCRIBE: " + err.Error())
+			}
+
+			shareName = string(t[1])
+			t = t[2:]
+		}
 
 		var sTL *topicLevel
 		var cTL *topL
@@ -365,14 +408,40 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, ops []uint8, id 
 				cTL = &topL{}
 				cLev[string(tl)] = cTL
 				cTL.children = make(topT)
+				cTL.sharedGroups = make(map[string]struct{})
 			}
 
 			sLev, cLev = sTL.children, cTL.children
 		}
 
-		subDoesExist := cTL.subscribed
 		sub := subscription{id, ops[i]}
-		sTL.subscribers[c] = sub
+		if len(shareName) == 0 {
+			sTL.subscribers[c] = sub
+		} else {
+			ss := sTL.shared[shareName]
+			if ss == nil {
+				ss = &sharedSub{subs: make([]sharedSubscriber, 1, 4)}
+				sTL.shared[shareName] = ss
+				ss.subs[0] = sharedSubscriber{c, sub}
+			} else {
+				var modified bool
+				for j := range ss.subs {
+					if ss.subs[j].c == c {
+						ss.subs[j].sub = sub
+						modified = true
+						break
+					}
+				}
+				if !modified {
+					ss.subs = append(ss.subs, sharedSubscriber{c, sub})
+				}
+			}
+
+			cTL.sharedGroups[shareName] = struct{}{}
+			continue // TODO: send retained messages if sub already exists?
+		}
+
+		subDoesExist := cTL.subscribed
 		cTL.subscribed = true
 
 		// Retained messages
@@ -440,9 +509,10 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, ops []uint8, id 
 
 		matchLevel(s.retained, 0)
 	}
+	return nil
 }
 
-func (s *Server) removeSubscriptions(c *client, topics [][][]byte) {
+func (s *Server) removeSubscriptions(c *client, topics [][][]byte) error {
 	var sTL *topicLevel
 	var cTL *topL
 	var ok bool
@@ -453,6 +523,16 @@ func (s *Server) removeSubscriptions(c *client, topics [][][]byte) {
 loop:
 	for _, t := range topics {
 		sl, cl := s.subscriptions, c.subscriptions
+
+		var shareName string
+		if bytes.Equal(t[0], isSharedSub) {
+			if err := c.session.checkSharedSubscriptionTopicFilter(t); err != nil {
+				return errors.New("malformed UNSUBSCRIBE: " + err.Error())
+			}
+
+			shareName = bytesToStringUnsafe(t[1])
+			t = t[2:]
+		}
 
 		for _, tl := range t {
 			tlStr := bytesToStringUnsafe(tl)
@@ -469,12 +549,37 @@ loop:
 			sl, cl = sTL.children, cTL.children
 		}
 
-		delete(sTL.subscribers, c)
-		cTL.subscribed = false
+		if len(shareName) == 0 {
+			delete(sTL.subscribers, c)
+			cTL.subscribed = false
+		} else {
+			ss := sTL.shared[shareName]
+			if ss != nil {
+				ss.removeSubber(c)
+				if len(ss.subs) == 0 {
+					delete(sTL.shared, shareName)
+				}
+			}
+			delete(cTL.sharedGroups, shareName)
+		}
+
 	}
+	return nil
 }
 
 func (s *Server) forwardToSubscribers(tl *topicLevel, p *model.PubMessage) {
+	// Shared Subscriptions
+	// TODO: better algo: check conn health, limit to QoS1, queue, etc.
+	for _, ss := range tl.shared {
+		subber := ss.subs[ss.next%len(ss.subs)]
+		ss.next++
+		if ss.next < 0 {
+			ss.next = 0
+		}
+		subber.c.processPub(p, subber.sub, false)
+	}
+
+	// Non-shared Subscriptions
 	for c, sub := range tl.subscribers {
 		c.processPub(p, sub, false)
 	}
@@ -493,7 +598,7 @@ func (s *Server) matchTopicLevel(p *model.PubMessage, l topicTree, ln int) {
 		}
 	}
 
-	if ln == 0 && s.sepPubTopic[0][0] == '$' {
+	if ln == 0 && len(s.sepPubTopic[0]) > 0 && s.sepPubTopic[0][0] == '$' {
 		return // [MQTT-4.7.2-1]
 	}
 

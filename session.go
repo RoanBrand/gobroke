@@ -156,6 +156,23 @@ func (s *session) end(disconnectRC uint8) {
 	})
 }
 
+func (s *session) checkSharedSubscriptionTopicFilter(t [][]byte) error {
+	if len(t) < 3 || len(t[1]) == 0 { // v5[MQTT-4.8.2-1]
+		s.disconnectReasonCode = model.ProtocolError
+		return errors.New("bad Shared Subscription ShareName or Topic Filter")
+	}
+	if err := checkUTF8(t[1], true); err != nil { // TODO: just check wildcards as UTF8 already checked
+		s.disconnectReasonCode = model.ProtocolError
+		return errors.New("bad Shared Subscription ShareName: " + err.Error())
+	}
+	if len(t) == 3 && len(t[2]) == 0 { // v5[MQTT-4.8.2-2]
+		s.disconnectReasonCode = model.ProtocolError
+		return errors.New("bad Shared Subscription Topic Filter: must be at least one char")
+	}
+
+	return nil
+}
+
 func (s *session) handlePubrec() error {
 	pId := binary.BigEndian.Uint16(s.packet.vhBuf)
 	dupV3 := !s.client.qos2Part1Done(pId) && s.protoVersion == 3 && s.client.q2Stage2.Present(pId)
@@ -225,7 +242,6 @@ func (s *session) updateTimeout() {
 
 var connackProps = []byte{
 	model.TopicAliasMaximum, 0xFF, 0xFF, // support max value Topic Alias Maximum
-	model.SharedSubscriptionsAvailable, 0, // not supported yet
 }
 
 // Send CONNACK with success 0.
