@@ -42,12 +42,21 @@ type Config struct {
 		Level string `json:"level"`
 	} `json:"log"`
 
-	// Only for MQTT v3,4.
 	// QoS 1&2 unacknowledged message resend timeout in s.
 	// Default 60s. Set to -1 to disable timeout based resend.
-	// Will always resend unacknowledged messages once on new connection,
+	// Only for MQTT v3,4 clients. v5 clients never time out.
+	// Will always resend unacknowledged messages on new connection,
 	// regardless of protocol level and this setting.
 	TimeoutQoS12MQTT34 int64 `json:"timeout_qos12_mqtt34"`
+
+	// If specified, and a Client connects with a larger Keep Alive specified,
+	// the server will send back this value in CONNACK to client.
+	// Only for MQTTv5 clients.
+	KeepAliveMaxMQTT5 uint16 `json:"server_keep_alive_max_mqtt5"`
+	// If specified, the server will always send back this value to connecting clients,
+	// regardless of their specified Keep Alive value.
+	// Only for MQTTv5 clients.
+	KeepAliveOverrideMQTT5 uint16 `json:"server_keep_alive_override_mqtt5"`
 }
 
 type keyPair struct {

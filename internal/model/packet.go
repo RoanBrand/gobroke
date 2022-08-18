@@ -45,6 +45,7 @@ const (
 	SubscriptionIdentifier     = 11
 	SessionExpiryInterval      = 17
 	AssignedClientIdentifier   = 18
+	ServerKeepAlive            = 19
 	AuthenticationMethod       = 21
 	AuthenticationData         = 22
 	RequestProblemInformation  = 23

@@ -316,8 +316,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						return errors.New("malformed CONNECT: reserved header flag must be 0")
 					}
 
-					// [MQTT-3.1.2-24]
-					ses.keepAlive = time.Duration(binary.BigEndian.Uint16(p.vhBuf[4+pnLen:])) * time.Second * 3 / 2
+					ses.keepAlive = time.Duration(binary.BigEndian.Uint16(p.vhBuf[4+pnLen:]))
 				case model.DISCONNECT:
 					if p.remainingLength == 0 {
 						return ses.handleDisconnect()
@@ -649,7 +648,7 @@ func (s *Server) handleConnect(ses *session) error {
 	go ses.startWriter()
 
 	// [MQTT-3.2.2-1, 2-2, 2-3]
-	ses.sendConnackSuccess(sessionIsPresent)
+	ses.sendConnackSuccess(&s.Config, sessionIsPresent)
 	ses.run(s.TimeoutQoS12MQTT34)
 	return nil
 }

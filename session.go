@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/RoanBrand/gobroke/internal/config"
 	"github.com/RoanBrand/gobroke/internal/model"
 	"github.com/RoanBrand/gobroke/internal/queue"
 	log "github.com/sirupsen/logrus"
@@ -240,11 +241,13 @@ var connackProps = []byte{
 }
 
 // Send CONNACK with success 0.
-func (s *session) sendConnackSuccess(sessionPresent bool) error {
+func (s *session) sendConnackSuccess(c *config.Config, sessionPresent bool) error {
 	p := s.packet.payload[:0]
 	p = append(p, model.CONNACK)
 
 	if s.protoVersion < 5 {
+		s.keepAlive *= time.Second * 3 / 2 // v4[MQTT-3.1.2-24]
+
 		p = append(p, 2)
 		if sessionPresent {
 			p = append(p, 1)
@@ -260,6 +263,20 @@ func (s *session) sendConnackSuccess(sessionPresent bool) error {
 		propsLen += 3 + len(s.clientId)
 	}
 
+	// Server Keep Alive
+	var serverKA uint16
+	if c.KeepAliveOverrideMQTT5 > 0 {
+		s.keepAlive = time.Duration(c.KeepAliveOverrideMQTT5)
+		serverKA = c.KeepAliveOverrideMQTT5
+		propsLen += 3
+	} else if c.KeepAliveMaxMQTT5 > 0 && s.keepAlive > time.Duration(c.KeepAliveMaxMQTT5) {
+		s.keepAlive = time.Duration(c.KeepAliveMaxMQTT5)
+		serverKA = c.KeepAliveMaxMQTT5
+		propsLen += 3
+	}
+
+	s.keepAlive *= time.Second * 3 / 2 // v5[MQTT-3.1.2-22]
+
 	rl := 2 + model.LengthToNumberOfVariableLengthBytes(propsLen) + propsLen
 
 	p = model.VariableLengthEncode(p, rl)
@@ -274,13 +291,18 @@ func (s *session) sendConnackSuccess(sessionPresent bool) error {
 	// Reason Code
 	p = append(p, 0) // success
 
+	// Properties
 	p = model.VariableLengthEncode(p, propsLen)
 	p = append(p, connackProps...)
 
 	if s.assignedCId {
 		cIdLen := uint16(len(s.clientId))
-		p = append(p, 18, byte(cIdLen>>8), byte(cIdLen))
+		p = append(p, model.AssignedClientIdentifier, byte(cIdLen>>8), byte(cIdLen))
 		p = append(p, []byte(s.clientId)...)
+	}
+
+	if serverKA > 0 {
+		p = append(p, model.ServerKeepAlive, byte(serverKA>>8), byte(serverKA))
 	}
 
 	return s.writePacket(p)

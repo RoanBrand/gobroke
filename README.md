@@ -85,7 +85,6 @@ s.Run()
 ## TODO
 * MQTT 5:
 	* Response Information
-	* Server Keep Alive
 	* AUTH
 
 * Tests to cover entire MQTT spec.
