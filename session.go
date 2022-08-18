@@ -76,7 +76,7 @@ type topicAliasesClient struct {
 	left    int32
 }
 
-func (s *session) run() {
+func (s *session) run(timeoutQoS12MQTT34 int64) {
 	c := s.client
 
 	if err := c.q2Stage2.ResendAll(s.sendPubrelFromQueue); err != nil {
@@ -103,16 +103,11 @@ func (s *session) run() {
 	go c.q1.StartDispatcher(s.ctx, s.sendPublish, s.getPId, &s.ended)
 	go c.q2.StartDispatcher(s.ctx, s.sendPublish, s.getPId, &s.ended)
 
-	// QoS 1&2 unacknowledged message resend timeout in ms
-	// Set to 0 to disable. Will always resend once on new conn.
-	// TODO: move to config
-	var retryInterval uint64 = 50000
-
-	if s.protoVersion != 5 && retryInterval > 0 {
+	if s.protoVersion < 5 && timeoutQoS12MQTT34 > 0 {
 		s.ended.Add(3)
-		go c.q2Stage2.MonitorTimeouts(s.ctx, retryInterval, s.sendPubrelFromQueue, &s.ended)
-		go c.q1.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.ended)
-		go c.q2.MonitorTimeouts(s.ctx, retryInterval, s.sendPublish, &s.ended)
+		go c.q2Stage2.MonitorTimeouts(s.ctx, timeoutQoS12MQTT34, s.sendPubrelFromQueue, &s.ended)
+		go c.q1.MonitorTimeouts(s.ctx, timeoutQoS12MQTT34, s.sendPublish, &s.ended)
+		go c.q2.MonitorTimeouts(s.ctx, timeoutQoS12MQTT34, s.sendPublish, &s.ended)
 	}
 }
 

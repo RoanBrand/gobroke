@@ -116,8 +116,8 @@ func (q *queue) removeDoubly(i *Item) {
 }
 
 // Resend pending/unacknowledged QoS 1 & 2 messages after timeout.
-func (q *queue) monitorTimeouts(ctx context.Context, toMS uint64, timedOut func(*Item) error) {
-	timeout := time.Millisecond * time.Duration(toMS)
+func (q *queue) monitorTimeouts(ctx context.Context, toS int64, timedOut func(*Item) error) {
+	timeout := time.Second * time.Duration(toS)
 	t := time.NewTimer(timeout)
 	defer func() {
 		if !t.Stop() {

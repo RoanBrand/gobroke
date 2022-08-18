@@ -41,6 +41,13 @@ type Config struct {
 		File  string `json:"file"`
 		Level string `json:"level"`
 	} `json:"log"`
+
+	// Only for MQTT v3,4.
+	// QoS 1&2 unacknowledged message resend timeout in s.
+	// Default 60s. Set to -1 to disable timeout based resend.
+	// Will always resend unacknowledged messages once on new connection,
+	// regardless of protocol level and this setting.
+	TimeoutQoS12MQTT34 int64 `json:"timeout_qos12_mqtt34"`
 }
 
 type keyPair struct {
@@ -94,6 +101,10 @@ func (c *Config) validate() error {
 		if !strings.Contains(c.WSS.Address, ":") {
 			c.WSS.Address += ":443"
 		}
+	}
+
+	if c.TimeoutQoS12MQTT34 == 0 {
+		c.TimeoutQoS12MQTT34 = 60
 	}
 
 	return nil

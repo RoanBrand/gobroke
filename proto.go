@@ -650,7 +650,7 @@ func (s *Server) handleConnect(ses *session) error {
 
 	// [MQTT-3.2.2-1, 2-2, 2-3]
 	ses.sendConnackSuccess(sessionIsPresent)
-	ses.run()
+	ses.run(s.TimeoutQoS12MQTT34)
 	return nil
 }
 

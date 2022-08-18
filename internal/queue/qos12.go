@@ -151,14 +151,14 @@ func (q *QoS12) StartDispatcher(ctx context.Context, d func(*Item) error, getPId
 }
 
 // Resend pending/unacknowledged QoS 1 & 2 PUBLISHs after timeout.
-func (q *QoS12) MonitorTimeouts(ctx context.Context, toMS uint64, d func(*Item) error, wg *sync.WaitGroup) {
-	q.queue.monitorTimeouts(ctx, toMS, d)
+func (q *QoS12) MonitorTimeouts(ctx context.Context, toS int64, d func(*Item) error, wg *sync.WaitGroup) {
+	q.queue.monitorTimeouts(ctx, toS, d)
 	wg.Done()
 }
 
 // Resend pending/unacknowledged QoS 2 PUBRELs after timeout.
-func (q *QoS2Part2) MonitorTimeouts(ctx context.Context, toMS uint64, d func(*Item) error, wg *sync.WaitGroup) {
-	q.queue.monitorTimeouts(ctx, toMS, d)
+func (q *QoS2Part2) MonitorTimeouts(ctx context.Context, toS int64, d func(*Item) error, wg *sync.WaitGroup) {
+	q.queue.monitorTimeouts(ctx, toS, d)
 	wg.Done()
 }
 
