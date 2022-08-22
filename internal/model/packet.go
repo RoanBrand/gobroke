@@ -28,6 +28,7 @@ const (
 	MalformedPacket                 = 129
 	ProtocolError                   = 130
 	UnsupportedProtocolVersion      = 132
+	NotAuthorized                   = 135
 	ServerShuttingDown              = 139
 	KeepAliveTimeout                = 141
 	SessionTakenOver                = 142

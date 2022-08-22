@@ -473,8 +473,10 @@ func testConnect(t *testing.T) {
 		t.Fatal(err)
 	case <-tooLong.C:
 		t.Fatal(protoErr)
-	case <-c.connacks:
-		t.Fatal(protoErr)
+	case connack := <-c.connacks:
+		if connack.code != 4 {
+			t.Fatal(protoErr, connack)
+		}
 	case <-c.dead:
 	}
 
@@ -562,8 +564,10 @@ func testConnect(t *testing.T) {
 		t.Fatal(err)
 	case <-tooLong.C:
 		t.Fatal(protoErr)
-	case <-c.connacks:
-		t.Fatal(protoErr)
+	case connack := <-c.connacks:
+		if connack.code != 4 {
+			t.Fatal(protoErr, connack)
+		}
 	case <-c.dead:
 	}
 

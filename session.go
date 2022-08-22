@@ -19,38 +19,35 @@ import (
 var aLongTimeAgo = time.Unix(1, 0) // used for cancellation
 
 type session struct {
-	client *client
-	conn   net.Conn
-
-	packet  packet
-	rxState uint8
-
-	onlyOnce             sync.Once
-	ctx                  context.Context
-	cancel               context.CancelFunc
-	ended                sync.WaitGroup
-	disconnectReasonCode uint8
-
-	clientId       string
-	assignedCId    bool
-	connectSent    bool
-	connectFlags   byte
-	protoVersion   uint8
-	keepAlive      time.Duration
-	expiryInterval uint32
-	maxPacketSize  uint32
-	receiveMax     uint16
-	sendQuota      chan struct{}
-	topicAliasMax  uint16
-	reqRespInfo    bool
-	reqProblemInfo bool
-
+	client   *client
+	conn     net.Conn
+	clientId string
 	will     *model.PubMessage
-	userName string
-	password []byte
+
+	packet packet
+
+	onlyOnce sync.Once
+	ctx      context.Context
+	cancel   context.CancelFunc
+	ended    sync.WaitGroup
 
 	taToClient   topicAliasesClient
 	taFromClient map[uint16][]byte
+
+	keepAlive            time.Duration
+	sendQuota            chan struct{}
+	expiryInterval       uint32
+	maxPacketSize        uint32
+	receiveMax           uint16
+	topicAliasMax        uint16
+	connectFlags         uint8
+	disconnectReasonCode uint8
+	protoVersion         uint8
+
+	connectSent    bool
+	assignedCId    bool
+	reqRespInfo    bool
+	reqProblemInfo bool
 }
 
 type packet struct {
@@ -68,6 +65,7 @@ type packet struct {
 	pID        uint16 // subscribe, unsubscribe, publish with QoS>0.
 	topicAlias uint16 // PUBLISH
 
+	rxState     uint8
 	controlType uint8
 	flags       uint8
 }

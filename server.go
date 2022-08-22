@@ -29,6 +29,8 @@ func init() {
 
 type Server struct {
 	config.Config
+	Auther
+
 	ctx    context.Context
 	cancel context.CancelFunc
 

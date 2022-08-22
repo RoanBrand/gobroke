@@ -54,7 +54,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 	p, l := &ses.packet, len(rx)
 
 	for i := 0; i < l; {
-		switch ses.rxState {
+		switch p.rxState {
 		case controlAndFlags:
 			p.controlType, p.flags = rx[i]&0xF0, rx[i]&0x0F
 
@@ -105,7 +105,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				return errors.New("invalid MQTT Control Packet type")
 			}
 
-			ses.rxState = length
+			p.rxState = length
 			p.lenMul = 1
 			i++
 		case length:
@@ -119,7 +119,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				case model.PUBLISH:
 					p.vhToRead = 2
 					p.vhBuf = p.vhBuf[:0]
-					ses.rxState = variableHeaderLen
+					p.rxState = variableHeaderLen
 				case model.PUBACK, model.PUBREC, model.PUBREL, model.PUBCOMP:
 					p.vhToRead = 2
 					if ses.protoVersion == 5 && p.remainingLength > 2 {
@@ -127,7 +127,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 					}
 
 					p.vhBuf = p.vhBuf[:0]
-					ses.rxState = variableHeader
+					p.rxState = variableHeader
 				case model.SUBSCRIBE:
 					// [MQTT-3.8.3-3]
 					if p.remainingLength < 5 || (ses.protoVersion == 5 && p.remainingLength < 6) {
@@ -136,7 +136,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 					p.vhToRead = 2
 					p.vhBuf = p.vhBuf[:0]
-					ses.rxState = variableHeader
+					p.rxState = variableHeader
 				case model.UNSUBSCRIBE:
 					if p.remainingLength < 4 || (ses.protoVersion == 5 && p.remainingLength < 5) { // [MQTT-3.10.3-2]
 						return errors.New("malformed UNSUBSCRIBE: no Topic Filter present")
@@ -144,18 +144,18 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 					p.vhToRead = 2
 					p.vhBuf = p.vhBuf[:0]
-					ses.rxState = variableHeader
+					p.rxState = variableHeader
 				case model.PINGREQ:
 					if err := ses.writePacket(pingRespPacket); err != nil {
 						return err
 					}
 
 					ses.updateTimeout()
-					ses.rxState = controlAndFlags
+					p.rxState = controlAndFlags
 				case model.CONNECT:
 					p.vhToRead = 2
 					p.vhBuf = p.vhBuf[:0]
-					ses.rxState = variableHeaderLen
+					p.rxState = variableHeaderLen
 				case model.DISCONNECT:
 					if p.remainingLength == 0 {
 						log.WithFields(log.Fields{
@@ -170,7 +170,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 
 					p.vhToRead = 1 // Reason Code
 					p.vhBuf = p.vhBuf[:0]
-					ses.rxState = variableHeader
+					p.rxState = variableHeader
 				}
 			} else {
 				p.lenMul *= 128
@@ -205,7 +205,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				} else { // CONNECT
 					p.vhToRead += 4 // ProtoVersion + ConnectFlags + KeepAlive
 				}
-				ses.rxState = variableHeader
+				p.rxState = variableHeader
 			}
 
 			i += toRead
@@ -292,13 +292,13 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 							ses.sendConnackFail(model.UnsupportedProtocolVersion)
 						}
 
-						return errors.New("unsupported client protocol. Must be MQTT v3.1 (3), v3.1.1 (4) or v5 (5)")
+						return errors.New("unsupported client protocol. Must be MQTT 3 (v3.1), 4 (v3.1.1) or 5 (v5)")
 					}
 
 					switch ses.protoVersion {
 					case 3:
 						if p.remainingLength < 3 {
-							return errors.New("invalid CONNECT: ClientId must be between 1-23 characters long for MQTT v3.1 (3)")
+							return errors.New("invalid CONNECT: ClientId must be between 1-23 characters long for MQTT 3 (v3.1)")
 						}
 					case 4:
 						if p.remainingLength < 2 { // [MQTT-3.1.3-3]
@@ -331,13 +331,13 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 						}
 					}
 					ses.updateTimeout()
-					ses.rxState = controlAndFlags
+					p.rxState = controlAndFlags
 				} else if ses.protoVersion > 4 {
 					p.lenMul = 1
-					ses.rxState = propertiesLen
+					p.rxState = propertiesLen
 				} else {
 					p.payload = p.payload[:0]
-					ses.rxState = payload
+					p.rxState = payload
 				}
 			}
 
@@ -368,7 +368,7 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 				}
 
 				ses.updateTimeout()
-				ses.rxState = controlAndFlags
+				p.rxState = controlAndFlags
 			}
 
 			i += toRead
@@ -389,34 +389,34 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 								return err
 							}
 							ses.updateTimeout()
-							ses.rxState = controlAndFlags
+							p.rxState = controlAndFlags
 						} else {
-							ses.rxState = payload
+							p.rxState = payload
 						}
 					case model.PUBACK:
 						ses.client.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
-						ses.rxState = controlAndFlags
+						p.rxState = controlAndFlags
 					case model.PUBREC:
 						if err := ses.handlePubrec(); err != nil {
 							return err
 						}
-						ses.rxState = controlAndFlags
+						p.rxState = controlAndFlags
 					case model.PUBREL:
 						if err := ses.handlePubrel(); err != nil {
 							return err
 						}
-						ses.rxState = controlAndFlags
+						p.rxState = controlAndFlags
 					case model.PUBCOMP:
 						ses.client.qos2Part2Done(binary.BigEndian.Uint16(p.vhBuf))
-						ses.rxState = controlAndFlags
+						p.rxState = controlAndFlags
 					case model.DISCONNECT:
 						return ses.handleDisconnect()
 					default: // subscribe, unsubscribe, connect
 						p.payload = p.payload[:0]
-						ses.rxState = payload
+						p.rxState = payload
 					}
 				} else {
-					ses.rxState = properties
+					p.rxState = properties
 				}
 			} else {
 				p.lenMul *= 128
@@ -442,48 +442,48 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 							return err
 						}
 						ses.updateTimeout()
-						ses.rxState = controlAndFlags
+						p.rxState = controlAndFlags
 					} else {
-						ses.rxState = payload
+						p.rxState = payload
 					}
 				case model.PUBACK:
 					// TODO: handle PUBACK props
 					ses.client.qos1Done(binary.BigEndian.Uint16(p.vhBuf))
-					ses.rxState = controlAndFlags
+					p.rxState = controlAndFlags
 				case model.PUBREC:
 					// TODO: handle PUBREC props
 					if err := ses.handlePubrec(); err != nil {
 						return err
 					}
-					ses.rxState = controlAndFlags
+					p.rxState = controlAndFlags
 				case model.PUBREL:
 					// TODO: handle PUBREL props
 					if err := ses.handlePubrel(); err != nil {
 						return err
 					}
-					ses.rxState = controlAndFlags
+					p.rxState = controlAndFlags
 				case model.PUBCOMP:
 					// TODO: handle PUBCOMP props
 					ses.client.qos2Part2Done(binary.BigEndian.Uint16(p.vhBuf))
-					ses.rxState = controlAndFlags
+					p.rxState = controlAndFlags
 				case model.SUBSCRIBE:
 					/*if err := ses.handleSubscribeProperties(); err != nil {
 						return err
 					}*/
 					p.payload = p.payload[:0]
-					ses.rxState = payload
+					p.rxState = payload
 				case model.UNSUBSCRIBE:
 					if err := s.handleUnSubscribeProperties(ses); err != nil {
 						return err
 					}
 					p.payload = p.payload[:0]
-					ses.rxState = payload
+					p.rxState = payload
 				case model.CONNECT:
 					if err := s.handleConnectProperties(ses); err != nil {
 						return err
 					}
 					p.payload = p.payload[:0]
-					ses.rxState = payload
+					p.rxState = payload
 				case model.DISCONNECT:
 					return s.handleDisconnectProperties(ses)
 				}
@@ -510,7 +510,7 @@ func (s *Server) handleConnect(ses *session) error {
 	if clientIdLen > 0 {
 		if ses.protoVersion == 3 && clientIdLen > 23 {
 			ses.sendConnackFail(2)
-			return errors.New("invalid CONNECT: ClientId must be between 1-23 characters long for MQTT v3.1 (3)")
+			return errors.New("invalid CONNECT: ClientId must be between 1-23 characters long for MQTT 3 (v3.1)")
 		}
 
 		if err := checkUTF8(p[2:offs], false); err != nil { // [MQTT-3.1.3-4]
@@ -588,43 +588,66 @@ func (s *Server) handleConnect(ses *session) error {
 	}
 
 	// Username & Password
+	var userName, password []byte
 	if ses.connectFlags&0x80 > 0 {
 		if pLen < 2+offs {
+			if ses.protoVersion < 5 {
+				ses.sendConnackFail(4)
+			}
 			return errors.New("malformed CONNECT: no User Name in payload")
 		}
 
 		userLen := int(binary.BigEndian.Uint16(p[offs:]))
 		offs += 2
 		if pLen < offs+userLen {
+			if ses.protoVersion < 5 {
+				ses.sendConnackFail(4)
+			}
 			return errors.New("malformed CONNECT: payload too short for User Name")
 		}
 
-		userName := p[offs : offs+userLen]
+		userName = p[offs : offs+userLen]
 		if err := checkUTF8(userName, false); err != nil { // [MQTT-3.1.3-11]
+			if ses.protoVersion < 5 {
+				ses.sendConnackFail(4)
+			}
 			return errors.New("malformed CONNECT: bad User Name: " + err.Error())
 		}
 
-		ses.userName = string(userName)
 		offs += userLen
-
 		if ses.connectFlags&0x40 > 0 {
 			if pLen < 2+offs {
+				if ses.protoVersion < 5 {
+					ses.sendConnackFail(4)
+				}
 				return errors.New("malformed CONNECT: no Password in payload")
 			}
 
 			passLen := int(binary.BigEndian.Uint16(p[offs:]))
 			offs += 2
 			if pLen < offs+passLen {
+				if ses.protoVersion < 5 {
+					ses.sendConnackFail(4)
+				}
 				return errors.New("malformed CONNECT: payload too short for Password")
 			}
 
-			ses.password = make([]byte, passLen)
-			copy(ses.password, p[offs:offs+passLen])
+			password = p[offs : offs+passLen]
 			offs += passLen
 		}
-
 	} else if ses.connectFlags&0x40 > 0 {
 		return errors.New("malformed CONNECT: Password present without User Name")
+	}
+
+	if s.Auther != nil {
+		if err := s.Auther.AuthUser(ses.clientId, userName, password); err != nil {
+			if ses.protoVersion < 5 {
+				ses.sendConnackFail(5)
+			} else {
+				ses.sendConnackFail(model.NotAuthorized)
+			}
+			return errors.New("failed authentication for client " + ses.clientId + ": " + err.Error())
+		}
 	}
 
 	if offs != pLen {
@@ -818,6 +841,12 @@ func (s *Server) handlePublish(ses *session) error {
 			copy(t, topicUTF8)
 			ses.taFromClient[p.topicAlias] = t
 			p.topicAlias = 0
+		}
+	}
+
+	if s.Auther != nil {
+		if err := s.Auther.AuthPublish(ses.clientId, topicUTF8[2:]); err != nil {
+			return errors.New("failed publish authorization for client " + ses.clientId + ": " + err.Error())
 		}
 	}
 
