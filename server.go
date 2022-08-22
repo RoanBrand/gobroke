@@ -5,11 +5,15 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
+	"math/rand"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/RoanBrand/gobroke/internal/config"
@@ -18,6 +22,10 @@ import (
 	"github.com/RoanBrand/gobroke/internal/websocket"
 	log "github.com/sirupsen/logrus"
 )
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+}
 
 type Server struct {
 	config.Config
@@ -683,4 +691,27 @@ func (s *Server) splitPubTopic(topic []byte) {
 		topic = topic[i+1:]
 	}
 	s.sepPubTopic = append(s.sepPubTopic, topic)
+}
+
+// returns readable UUID (non-standard)
+// try 128-bit random number. If cannot, use current time.
+func generateRandomID() []byte {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		log.Warnln("failed to generate random UUID: ", err)
+		return strconv.AppendInt(make([]byte, 0, 19), time.Now().UnixNano(), 10)
+	}
+
+	id := make([]byte, 36)
+	hex.Encode(id, b[:4])
+	id[8] = '-'
+	hex.Encode(id[9:], b[4:6])
+	id[13] = '-'
+	hex.Encode(id[14:], b[6:8])
+	id[18] = '-'
+	hex.Encode(id[19:], b[8:10])
+	id[23] = '-'
+	hex.Encode(id[24:], b[10:])
+
+	return id
 }

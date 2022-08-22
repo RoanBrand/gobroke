@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -497,8 +496,6 @@ func (s *Server) parseStream(ses *session, rx []byte) error {
 	return nil
 }
 
-var unNamedClients uint32
-
 func (s *Server) handleConnect(ses *session) error {
 	p := ses.packet.payload
 	pLen := len(p)
@@ -527,8 +524,7 @@ func (s *Server) handleConnect(ses *session) error {
 			return errors.New("malformed CONNECT: must have ClientId with CleanSession set to 0")
 		}
 
-		newUnNamed := atomic.AddUint32(&unNamedClients, 1)
-		ses.clientId = fmt.Sprintf("noname-%d-%d", newUnNamed, time.Now().UnixNano()/100000)
+		ses.clientId = "auto-" + string(generateRandomID())
 		ses.assignedCId = true
 	}
 
@@ -734,6 +730,7 @@ func (s *Server) handleConnectProperties(ses *session) error {
 				return errors.New("malformed CONNECT: bad Request Response Information")
 			}
 
+			ses.reqRespInfo = props[i+1] == 1
 			gotRRI = true
 			i += 2
 		case model.RequestProblemInformation:

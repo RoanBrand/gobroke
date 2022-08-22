@@ -50,6 +50,7 @@ const (
 	AuthenticationData         = 22
 	RequestProblemInformation  = 23
 	RequestResponseInformation = 25
+	ResponseInformation        = 26
 	ServerReference            = 28
 	ReasonString               = 31
 	ReceiveMaximum             = 33

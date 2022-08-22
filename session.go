@@ -42,6 +42,7 @@ type session struct {
 	receiveMax     uint16
 	sendQuota      chan struct{}
 	topicAliasMax  uint16
+	reqRespInfo    bool
 	reqProblemInfo bool
 
 	will     *model.PubMessage
@@ -258,6 +259,7 @@ func (s *session) sendConnackSuccess(c *config.Config, sessionPresent bool) erro
 		return s.writePacket(p)
 	}
 
+	// Assigned Client Identifier
 	propsLen := len(connackProps)
 	if s.assignedCId {
 		propsLen += 3 + len(s.clientId)
@@ -277,8 +279,14 @@ func (s *session) sendConnackSuccess(c *config.Config, sessionPresent bool) erro
 
 	s.keepAlive *= time.Second * 3 / 2 // v5[MQTT-3.1.2-22]
 
-	rl := 2 + model.LengthToNumberOfVariableLengthBytes(propsLen) + propsLen
+	// Response Information
+	var rit []byte
+	if s.reqRespInfo { // TODO: Do not include if will cause to exceed MaxPackSize
+		rit = generateRandomID()
+		propsLen += 6 + len(rit) // cmd+2UTF8len + "ri-"
+	}
 
+	rl := 2 + model.LengthToNumberOfVariableLengthBytes(propsLen) + propsLen
 	p = model.VariableLengthEncode(p, rl)
 
 	// Ack Flags
@@ -296,9 +304,15 @@ func (s *session) sendConnackSuccess(c *config.Config, sessionPresent bool) erro
 	p = append(p, connackProps...)
 
 	if s.assignedCId {
-		cIdLen := uint16(len(s.clientId))
-		p = append(p, model.AssignedClientIdentifier, byte(cIdLen>>8), byte(cIdLen))
+		l := len(s.clientId)
+		p = append(p, model.AssignedClientIdentifier, byte(l>>8), byte(l))
 		p = append(p, []byte(s.clientId)...)
+	}
+
+	if s.reqRespInfo {
+		l := len(rit) + 3
+		p = append(p, model.ResponseInformation, byte(l>>8), byte(l), 'r', 'i', '-')
+		p = append(p, rit...)
 	}
 
 	if serverKA > 0 {

@@ -84,14 +84,15 @@ s.Run()
 
 ## TODO
 * MQTT 5:
-	* Response Information
+	* Better Shared Subscription client choosing algo
+	* Remaining Reason Codes & Reason Strings
 	* AUTH
 
+* $SYS Topic
 * Tests to cover entire MQTT spec.
 * Persistence (levelDB?)
-* $SYS Topic
 * User Auth system with:
     * Client whitelist & blacklist options
     * Client topic subscription whitelist & blacklist options
     * Client topic publish rights whitelist & blacklist
-* Rate limiting
+* Rate limiting?
