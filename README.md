@@ -80,6 +80,7 @@ s.Run()
 * `check_origin` ensures that Origin request header is present and that the origin host is equal to request Host header before accepting a connection
 ##### Authentication and Authorization
 * The `Auther` interface can be used to easily implement wrappers for external auth systems. See `auth.go`
+* A basic useful implementation can be found under the included `auth` package
 
 ## Test
 * `make test`
@@ -91,7 +92,6 @@ s.Run()
 	* AUTH
 
 * $SYS Topic
-* Basic auth package with whitelist and blacklist options
 * Tests to cover entire MQTT spec
 * Persistence (levelDB?)
 * Rate limiting?
