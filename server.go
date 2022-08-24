@@ -16,6 +16,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/RoanBrand/gobroke/auth"
 	"github.com/RoanBrand/gobroke/internal/config"
 	"github.com/RoanBrand/gobroke/internal/model"
 	"github.com/RoanBrand/gobroke/internal/queue"
@@ -29,7 +30,7 @@ func init() {
 
 type Server struct {
 	config.Config
-	Auther
+	auth.Auther
 
 	ctx    context.Context
 	cancel context.CancelFunc

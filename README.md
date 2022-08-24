@@ -79,8 +79,7 @@ s.Run()
 * The address must contain host/ip only and no URL. Currently it is served over all URLs
 * `check_origin` ensures that Origin request header is present and that the origin host is equal to request Host header before accepting a connection
 ##### Authentication and Authorization
-* The `Auther` interface can be used to easily implement wrappers for external auth systems. See `auth.go`
-* A basic useful implementation can be found under the included `auth` package
+* See `gobroke/auth` package
 
 ## Test
 * `make test`
