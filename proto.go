@@ -1064,7 +1064,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 	}
 
 	p := ses.packet.payload
-	topics, subOps := make([][][]byte, 0, 2), make([]uint8, 0, 2)
+	topics, subOps, subRCs := make([][][]byte, 0, 2), make([]uint8, 0, 2), make([]uint8, 0, 2)
 
 	for i := 0; i < len(p); {
 		topicL := int(binary.BigEndian.Uint16(p[i:]))
@@ -1095,6 +1095,22 @@ func (s *Server) handleSubscribe(ses *session) error {
 			return errors.New("malformed SUBSCRIBE: bad Topic Filter: " + err.Error())
 		}
 
+		if s.Auther != nil {
+			if err := s.Auther.AuthSubscription(ses.clientId, topic); err != nil {
+				if ses.protoVersion > 4 {
+					subRCs = append(subRCs, model.NotAuthorized)
+				} else {
+					subRCs = append(subRCs, model.UnspecifiedError)
+				}
+				i += 1 + topicL
+				continue
+			}
+		}
+
+		topics = append(topics, bytes.Split(topic, []byte{'/'}))
+		subOps, subRCs = append(subOps, subOp), append(subRCs, maxQoS(subOp))
+		i += 1 + topicL
+
 		if log.IsLevelEnabled(log.DebugLevel) {
 			log.WithFields(log.Fields{
 				"ClientId":     ses.clientId,
@@ -1102,9 +1118,6 @@ func (s *Server) handleSubscribe(ses *session) error {
 				"QoS":          maxQoS(subOp),
 			}).Debug("SUBSCRIBE received")
 		}
-
-		topics, subOps = append(topics, bytes.Split(topic, []byte{'/'})), append(subOps, subOp)
-		i += 1 + topicL
 	}
 
 	if err := s.addSubscriptions(ses.client, topics, subOps, uint32(subId)); err != nil {
@@ -1112,7 +1125,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 	}
 
 	// [MQTT-3.8.4-1, 4-4, 4-5, 4-6]
-	return ses.sendSuback(subOps)
+	return ses.sendSuback(subRCs)
 }
 
 func (s *session) handleSubscribeProperties() (int, error) {

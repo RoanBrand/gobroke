@@ -551,15 +551,10 @@ func (s *session) sendPubcomp() error {
 	return s.writePacket(p)
 }
 
-func (s *session) sendSuback(subOps []uint8) error {
-	rl := len(subOps) + 2
-	if s.protoVersion == 5 {
+func (s *session) sendSuback(subRCs []uint8) error {
+	rl := len(subRCs) + 2
+	if s.protoVersion > 4 {
 		rl++
-
-		for i := range subOps {
-			// convert qos to granted qos Reason Code
-			subOps[i] = maxQoS(subOps[i])
-		}
 	}
 
 	s.client.txLock.Lock()
@@ -571,12 +566,12 @@ func (s *session) sendSuback(subOps []uint8) error {
 	s.client.tx.WriteByte(s.packet.vhBuf[0]) // [MQTT-3.8.4-2]
 	s.client.tx.WriteByte(s.packet.vhBuf[1])
 
-	if s.protoVersion == 5 {
+	if s.protoVersion > 4 {
 		s.client.tx.WriteByte(0) // TODO: support properties
 	}
 
 	// Payload
-	_, err := s.client.tx.Write(subOps) // [MQTT-3.9.3-1]
+	_, err := s.client.tx.Write(subRCs) // [MQTT-3.9.3-1]
 
 	s.client.txLock.Unlock()
 	s.client.notifyFlusher()
