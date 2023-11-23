@@ -16,6 +16,27 @@ type program struct {
 	execDir    string
 }
 
+/*type auther struct{}
+
+func (a *auther) AuthUser(clientId string, username, password []byte) error {
+	if string(username) == "roan" && string(password) == "brand" {
+		return nil
+	}
+
+	return errors.New("not whitelisted")
+}
+
+func (a *auther) AuthPublish(clientId string, topicName []byte) error {
+	return nil
+}
+
+func (a *auther) AuthSubscription(clientId string, topicFilter []byte) error {
+	if clientId != "goodClient" && string(topicFilter) == "restricted" {
+		return errors.New("restricted")
+	}
+	return nil
+}*/
+
 func (p *program) Start(s service.Service) error {
 	if p.configFlag != "" {
 		if err := p.server.LoadFromFile(p.configFlag); err != nil {
@@ -35,6 +56,13 @@ func (p *program) Start(s service.Service) error {
 	}
 
 	go func() {
+		/*a := auth.NewBasicAuth()
+		a.ToggleGuestAccess(true)
+		a.RegisterUser("roan", "roan", "brand")
+		a.AllowSubscription("testtopic/#", "roan")
+		a.AllowPublish("testtopic", "bird")
+
+		p.server.Auther = a*/
 		if err := p.server.Run(); err != nil {
 			log.Fatal(err)
 		}
