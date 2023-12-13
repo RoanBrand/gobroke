@@ -16,12 +16,14 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/cockroachdb/pebble"
+	log "github.com/sirupsen/logrus"
+
 	"github.com/RoanBrand/gobroke/auth"
 	"github.com/RoanBrand/gobroke/internal/config"
 	"github.com/RoanBrand/gobroke/internal/model"
 	"github.com/RoanBrand/gobroke/internal/queue"
 	"github.com/RoanBrand/gobroke/internal/websocket"
-	log "github.com/sirupsen/logrus"
 )
 
 func init() {
@@ -48,9 +50,21 @@ type Server struct {
 	pubs queue.Basic
 
 	sepPubTopic [][]byte
+
+	db            *pebble.DB
+	dbBatch       *pebble.Batch
+	dbClients     map[uint64]*client
+	dbClientIdCnt uint64
+	dbSubIdCnt    uint64
+	dbPubIdCnt    uint64
 }
 
 func (s *Server) Run() error {
+	err := s.diskInit()
+	if err != nil {
+		return err
+	}
+
 	if s.TCP.Address == "" && s.TLS.Address == "" && s.WS.Address == "" && s.WSS.Address == "" {
 		s.TCP.Address = ":1883" // default to basic TCP only server if nothing specified.
 	}
@@ -65,10 +79,20 @@ func (s *Server) Run() error {
 	s.setupLogging()
 	s.pubs.Init()
 
-	if err := s.setupTCP(); err != nil {
+	if err = s.diskLoadClients(); err != nil {
 		return err
 	}
-	if err := s.setupTLS(); err != nil {
+	if err = s.diskLoadSubs(); err != nil {
+		return err
+	}
+	if err = s.diskLoadPubbedMsgs(); err != nil {
+		return err
+	}
+
+	if err = s.setupTCP(); err != nil {
+		return err
+	}
+	if err = s.setupTLS(); err != nil {
 		return err
 	}
 
@@ -93,19 +117,17 @@ func (s *Server) Run() error {
 	go s.pubs.StartDispatcher(s.ctx, s.matchSubscriptions, nil)
 
 	<-s.ctx.Done()
-	err := s.ctx.Err()
-	if errors.Is(err, context.Canceled) {
+	if err = s.ctx.Err(); errors.Is(err, context.Canceled) {
 		err = nil
 	}
 	return err
 }
 
 func (s *Server) Close() error {
-	s.Shutdown()
-	return nil
+	return s.Shutdown()
 }
 
-func (s *Server) Shutdown() {
+func (s *Server) Shutdown() error {
 	log.Info("Shutting down MQTT server")
 
 	if s.tcpL != nil {
@@ -135,6 +157,10 @@ func (s *Server) Shutdown() {
 
 	s.cancel()
 	s.pubs.NotifyDispatcher()
+
+	log.Println("closing db")
+	defer log.Println("closing db done")
+	return s.db.Close()
 }
 
 func (s *Server) setupLogging() error {
@@ -252,8 +278,14 @@ func (s *Server) addSession(ses *session) bool {
 
 		c.replaceSession(ses)
 	} else {
-		s.clients[ses.clientId] = newClient(ses)
+		s.clients[ses.clientId] = s.newClient(ses)
 		c = s.clients[ses.clientId]
+
+		if err := s.diskNewClient(c); err != nil {
+			log.WithFields(log.Fields{
+				"ClientId": ses.clientId,
+			}).Error("Could not add new client to db:", err)
+		}
 	}
 	ses.client = c
 	s.sesLock.Unlock()
@@ -286,6 +318,12 @@ func (s *Server) removeSession(ses *session) {
 		return
 	}
 
+	if err := s.diskDeleteClient(ses.client); err != nil {
+		log.WithFields(log.Fields{
+			"ClientId": ses.clientId,
+		}).Error("Could remove client from db:", err)
+	}
+
 	s.removeClientSubscriptions(ses.client)
 	ses.client.clearState()
 	delete(s.clients, ses.clientId)
@@ -312,13 +350,15 @@ func retainHandling(so uint8) uint8 {
 }
 
 type subscription struct {
+	dbSubId uint64
+
 	id      uint32
 	options uint8
 }
 
 type sharedSubscriber struct {
 	c   *client
-	sub subscription
+	sub *subscription
 }
 
 type sharedSub struct {
@@ -341,13 +381,13 @@ func (ss *sharedSub) removeSubber(c *client) {
 
 type topicLevel struct {
 	children    topicTree
-	subscribers map[*client]subscription
+	subscribers map[*client]*subscription
 	shared      map[string]*sharedSub
 }
 
 func (tl *topicLevel) init() {
 	tl.children = make(topicTree)
-	tl.subscribers = make(map[*client]subscription)
+	tl.subscribers = make(map[*client]*subscription)
 	tl.shared = make(map[string]*sharedSub)
 }
 
@@ -369,6 +409,12 @@ func (s *Server) removeClientSubscriptions(c *client) {
 				delete(cTL.sharedGroups, gn)
 			}
 			if cTL.subscribed {
+				if sub := sTL.subscribers[c]; sub != nil {
+					if err := s.diskDeleteSub(sub.dbSubId, c.dbClientId); err != nil {
+						log.Error(err)
+					}
+				}
+
 				delete(sTL.subscribers, c)
 				cTL.subscribed = false
 			}
@@ -382,11 +428,16 @@ func (s *Server) removeClientSubscriptions(c *client) {
 }
 
 // Add subscriptions for client. Also check for matching retained messages.
-func (s *Server) addSubscriptions(c *client, topics [][][]byte, ops []uint8, id uint32) error {
+func (s *Server) addSubscriptions(c *client, topics [][]byte, ops []uint8, id uint32, fromDisk bool) error {
+	topicsSplit := make([][][]byte, len(topics))
+	for i := range topics {
+		topicsSplit[i] = bytes.Split(topics[i], []byte{'/'})
+	}
+
 	s.subLock.Lock()
 	defer s.subLock.Unlock()
 
-	for i, t := range topics {
+	for i, t := range topicsSplit {
 		sLev, cLev := s.subscriptions, c.subscriptions
 
 		var shareName string
@@ -422,7 +473,7 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, ops []uint8, id 
 			sLev, cLev = sTL.children, cTL.children
 		}
 
-		sub := subscription{id, ops[i]}
+		sub := &subscription{0, id, ops[i]}
 		if len(shareName) == 0 {
 			sTL.subscribers[c] = sub
 		} else {
@@ -452,6 +503,12 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, ops []uint8, id 
 		subDoesExist := cTL.subscribed
 		cTL.subscribed = true
 
+		if !fromDisk && !subDoesExist {
+			if err := s.diskNewSub(topics[i], sub, c.dbClientId); err != nil {
+				return err
+			}
+		}
+
 		// Retained messages
 		if rh := retainHandling(ops[i]); rh == 2 || (rh == 1 && subDoesExist) {
 			continue
@@ -459,7 +516,7 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, ops []uint8, id 
 
 		forwardLevel := func(l *retainLevel) {
 			if l.p != nil {
-				c.processPub(l.p, sub, true)
+				s.processPub(c, l.p, sub, true)
 			}
 		}
 
@@ -520,7 +577,12 @@ func (s *Server) addSubscriptions(c *client, topics [][][]byte, ops []uint8, id 
 	return nil
 }
 
-func (s *Server) removeSubscriptions(c *client, topics [][][]byte) error {
+func (s *Server) removeSubscriptions(c *client, topics [][]byte) error {
+	topicsSplit := make([][][]byte, len(topics))
+	for i := range topics {
+		topicsSplit[i] = bytes.Split(topics[i], []byte{'/'})
+	}
+
 	var sTL *topicLevel
 	var cTL *topL
 	var ok bool
@@ -529,7 +591,7 @@ func (s *Server) removeSubscriptions(c *client, topics [][][]byte) error {
 	defer s.subLock.Unlock()
 
 loop:
-	for _, t := range topics {
+	for _, t := range topicsSplit {
 		sl, cl := s.subscriptions, c.subscriptions
 
 		var shareName string
@@ -558,8 +620,15 @@ loop:
 		}
 
 		if len(shareName) == 0 {
+			if sub := sTL.subscribers[c]; sub != nil {
+				if err := s.diskDeleteSub(sub.dbSubId, c.dbClientId); err != nil {
+					log.Error(err)
+				}
+			}
+
 			delete(sTL.subscribers, c)
 			cTL.subscribed = false
+
 		} else {
 			ss := sTL.shared[shareName]
 			if ss != nil {
@@ -584,12 +653,12 @@ func (s *Server) forwardToSubscribers(tl *topicLevel, p *model.PubMessage) {
 		if ss.next < 0 {
 			ss.next = 0
 		}
-		subber.c.processPub(p, subber.sub, false)
+		s.processPub(subber.c, p, subber.sub, false)
 	}
 
 	// Non-shared Subscriptions
 	for c, sub := range tl.subscribers {
-		c.processPub(p, sub, false)
+		s.processPub(c, p, sub, false)
 	}
 }
 
@@ -631,11 +700,19 @@ func (s *Server) matchTopicLevel(p *model.PubMessage, l topicTree, ln int) {
 // Match published message topic to all subscribers, and forward.
 // Also store pub if retained message.
 func (s *Server) matchSubscriptions(i *queue.Item) error {
+	if err := s.diskNewPublishedMsg(i.P); err != nil {
+		return err
+	}
+
 	tLen := binary.BigEndian.Uint16(i.P.B[1:])
 	s.splitPubTopic(i.P.B[3 : 3+tLen])
 
 	s.subLock.RLock()
 	s.matchTopicLevel(i.P, s.subscriptions, 0)
+
+	if err := s.diskCommitNewPubMsg(); err != nil {
+		return err
+	}
 
 	if !i.P.ToRetain() {
 		s.subLock.RUnlock()

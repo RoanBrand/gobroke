@@ -113,8 +113,13 @@ func (s *session) run(timeoutQoS12MQTT34 int64) {
 
 func (s *session) end(disconnectRC uint8) {
 	s.onlyOnce.Do(func() {
-		s.conn.SetReadDeadline(aLongTimeAgo)
-		s.cancel()
+		if s.conn != nil {
+			s.conn.SetReadDeadline(aLongTimeAgo)
+		}
+
+		if s.cancel != nil {
+			s.cancel()
+		}
 
 		c := s.client
 		if c != nil {
@@ -146,8 +151,10 @@ func (s *session) end(disconnectRC uint8) {
 			}).Error("failed to send DISCONNECT")
 		}
 
-		s.conn.Close()
-		s.conn = nil
+		if s.conn != nil {
+			s.conn.Close()
+			s.conn = nil
+		}
 	})
 }
 
@@ -481,7 +488,19 @@ func (s *session) sendPublish(i *queue.Item) error {
 
 	if qos == 0 {
 		s.incSendQuota()
-		i.P.FreeIfLastUser()
+
+		err := s.client.server.diskDeleteClientMsg(s.client.dbClientId, i.DbMsgTxId)
+		if err != nil {
+			log.Error(err)
+		}
+
+		pid := i.P.DbSPubId
+		if i.P.FreeIfLastUser() {
+			err := s.client.server.diskDeleteServerMsg(pid)
+			if err != nil {
+				log.Error(err)
+			}
+		}
 	}
 
 	return err

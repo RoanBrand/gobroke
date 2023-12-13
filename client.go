@@ -11,6 +11,7 @@ import (
 )
 
 type client struct {
+	server        *Server
 	session       *session
 	subscriptions topT
 	pIDs          chan uint16 // [MQTT-2.3.1-4]
@@ -25,10 +26,14 @@ type client struct {
 	q2         queue.QoS12
 	q2Stage2   queue.QoS2Part2
 	q2RxLookup map[uint16]struct{} // inbound
+
+	dbClientId   uint64
+	dbMsgRxIdCnt uint64
 }
 
-func newClient(ses *session) *client {
+func (s *Server) newClient(ses *session) *client {
 	c := client{
+		server:        s,
 		session:       ses,
 		subscriptions: make(topT),
 		pIDs:          make(chan uint16, 65535),
@@ -82,7 +87,7 @@ func (c *client) notifyFlusher() {
 	}
 }
 
-func (c *client) processPub(p *model.PubMessage, sub subscription, retained bool) {
+func (s *Server) processPub(c *client, p *model.PubMessage, sub *subscription, retained bool) {
 	if noLocal(sub.options) && c.session.clientId == p.Publisher {
 		return // v5[MQTT-3.8.3-3]
 	}
@@ -96,6 +101,11 @@ func (c *client) processPub(p *model.PubMessage, sub subscription, retained bool
 	i.SId, i.TxQoS, i.Retained = sub.id, finalQoS, retained
 	if p.ToRetain() && retainAsPublished(sub.options) {
 		i.Retained = true
+	}
+
+	err := s.diskNewPublishedMsgToClient(c, i, retained)
+	if err != nil {
+		log.Error(err)
 	}
 
 	p.AddUser()
@@ -119,7 +129,19 @@ func (c *client) qos1Done(pID uint16) {
 		return
 	}
 
-	i.P.FreeIfLastUser()
+	err := c.server.diskDeleteClientMsg(c.dbClientId, i.DbMsgTxId)
+	if err != nil {
+		log.Error(err)
+	}
+
+	pid := i.P.DbSPubId
+	if i.P.FreeIfLastUser() {
+		err := c.server.diskDeleteServerMsg(pid)
+		if err != nil {
+			log.Error(err)
+		}
+	}
+
 	queue.ReturnItemQos12(i)
 	c.pIDs <- pID
 }
@@ -134,7 +156,19 @@ func (c *client) qos2Part1Done(pID uint16) bool {
 		return false
 	}
 
-	i.P.FreeIfLastUser()
+	err := c.server.diskDeleteClientMsg(c.dbClientId, i.DbMsgTxId)
+	if err != nil {
+		log.Error(err)
+	}
+
+	pid := i.P.DbSPubId
+	if i.P.FreeIfLastUser() {
+		err := c.server.diskDeleteServerMsg(pid)
+		if err != nil {
+			log.Error(err)
+		}
+	}
+
 	i.P, i.Sent = nil, time.Now().Unix()
 	c.q2Stage2.Add(i)
 	return true

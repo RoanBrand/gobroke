@@ -892,6 +892,7 @@ func (s *Server) handlePublish(ses *session) error {
 	}
 
 	pub.Publisher = ses.clientId
+	pub.DbPubberId = ses.client.dbClientId
 
 	/*if log.IsLevelEnabled(log.DebugLevel) {
 		lf := log.Fields{
@@ -1064,7 +1065,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 	}
 
 	p := ses.packet.payload
-	topics, subOps, subRCs := make([][][]byte, 0, 2), make([]uint8, 0, 2), make([]uint8, 0, 2)
+	topics, subOps, subRCs := make([][]byte, 0, 2), make([]uint8, 0, 2), make([]uint8, 0, 2)
 
 	for i := 0; i < len(p); {
 		topicL := int(binary.BigEndian.Uint16(p[i:]))
@@ -1107,7 +1108,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 			}
 		}
 
-		topics = append(topics, bytes.Split(topic, []byte{'/'}))
+		topics = append(topics, topic)
 		subOps, subRCs = append(subOps, subOp), append(subRCs, maxQoS(subOp))
 		i += 1 + topicL
 
@@ -1120,7 +1121,7 @@ func (s *Server) handleSubscribe(ses *session) error {
 		}
 	}
 
-	if err := s.addSubscriptions(ses.client, topics, subOps, uint32(subId)); err != nil {
+	if err := s.addSubscriptions(ses.client, topics, subOps, uint32(subId), false); err != nil {
 		return err
 	}
 
@@ -1185,7 +1186,7 @@ func (s *session) handleSubscribeProperties() (int, error) {
 
 func (s *Server) handleUnsubscribe(ses *session) error {
 	p := ses.packet.payload
-	topics := make([][][]byte, 0, 2)
+	topics := make([][]byte, 0, 2)
 
 	for i := 0; i < len(p); {
 		topicL := int(binary.BigEndian.Uint16(p[i:]))
@@ -1203,7 +1204,7 @@ func (s *Server) handleUnsubscribe(ses *session) error {
 			}).Debug("UNSUBSCRIBE received")
 		}
 
-		topics = append(topics, bytes.Split(topic, []byte{'/'}))
+		topics = append(topics, topic)
 		i += topicEnd
 	}
 

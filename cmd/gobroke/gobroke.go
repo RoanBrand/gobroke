@@ -71,8 +71,7 @@ func (p *program) Start(s service.Service) error {
 }
 
 func (p *program) Stop(s service.Service) error {
-	p.server.Shutdown()
-	return nil
+	return p.server.Shutdown()
 }
 
 func main() {

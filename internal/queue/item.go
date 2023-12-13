@@ -17,6 +17,8 @@ type Item struct {
 	TxQoS    uint8
 	Retained bool // Msg sent to client due to subscription
 
+	DbMsgTxId uint64
+
 	next, prev *Item
 }
 

@@ -18,7 +18,9 @@ type PubMessage struct {
 
 	Props []byte // Properties to be forwarded as is
 
-	Publisher string // ClientId
+	Publisher  string // ClientId
+	DbPubberId uint64 //cid
+	DbSPubId   uint64 // incoming to server id
 }
 
 var pool = sync.Pool{}
@@ -52,12 +54,13 @@ func (p *PubMessage) AddUser() {
 	atomic.AddInt32(&p.refs, 1)
 }
 
-func (p *PubMessage) FreeIfLastUser() {
+func (p *PubMessage) FreeIfLastUser() (wasLast bool) {
 	if atomic.AddInt32(&p.refs, -1) > 0 {
-		return
+		return false
 	}
 
 	pool.Put(p)
+	return true
 }
 
 func (p *PubMessage) Duplicate() bool {
